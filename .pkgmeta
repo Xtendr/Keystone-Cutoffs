@@ -3,7 +3,7 @@ package-as: KeystoneCutoffs
 # Replace the value below with the numeric project ID from your CurseForge
 # addon page (e.g. https://www.curseforge.com/wow/addons/keystone-cutoffs
 # → "Project ID" in the sidebar, a number like 123456).
-curse-project-id: YOUR_PROJECT_ID_HERE
+curse-project-id: 1516987
 
 ignore:
   - update_cutoffs.py
