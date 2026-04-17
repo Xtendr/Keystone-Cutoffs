@@ -86,7 +86,7 @@ jobs:
         env:
           # BigWigsMods/packager reads this env var to authenticate with CurseForge.
           # The project ID itself lives in .pkgmeta (curse-project-id: ...).
-          CF_API_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Uncomment if you also publish to Wago.io or WoWInterface:
           # WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
