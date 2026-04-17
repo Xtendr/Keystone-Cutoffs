@@ -31,6 +31,8 @@ jobs:
     name: Update CutoffData.lua
     runs-on: ubuntu-latest
     if: github.event_name != 'push'    # Skip when triggered by a tag push.
+    outputs:
+      data_changed: ${{ steps.commit_data.outputs.data_changed }}
 
     steps:
       - name: Checkout repository
@@ -49,30 +51,57 @@ jobs:
         run: python update_cutoffs.py
 
       - name: Commit & push CutoffData.lua (if changed)
+        id: commit_data
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add CutoffData.lua
           if git diff --cached --quiet; then
             echo "No changes to CutoffData.lua — skipping commit."
+            echo "data_changed=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "chore(data): refresh CutoffData.lua [skip ci]"
             git push
+            echo "data_changed=true" >> "$GITHUB_OUTPUT"
           fi
 
   # ──────────────────────────────────────────────────────────────────────────
-  # 2. Package the addon and upload to CurseForge via BigWigsMods/packager.
-  #    Runs after update-data on schedule / manual runs, and immediately on
-  #    tag pushes (update-data is skipped in that case, so `needs` tolerates
-  #    it via always()).
+  # 2. On scheduled/manual runs, auto-create a version tag when new cutoff
+  #    data was committed. The tag push triggers a second workflow run, and
+  #    that run performs packaging/upload.
+  # ──────────────────────────────────────────────────────────────────────────
+  auto-tag-release:
+    name: Create auto release tag
+    runs-on: ubuntu-latest
+    needs: update-data
+    if: needs.update-data.outputs.data_changed == 'true'
+
+    steps:
+      - name: Checkout latest main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Create and push auto tag
+        run: |
+          git fetch --tags
+          TAG="v$(date -u +'%Y.%m.%d.%H%M')"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            TAG="${TAG}.${GITHUB_RUN_NUMBER}"
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "Created tag: $TAG"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 3. Package and upload only when this workflow is triggered by a version
+  #    tag push.
   # ──────────────────────────────────────────────────────────────────────────
   release:
     name: Package & Release
     runs-on: ubuntu-latest
-    needs: update-data
-    if: |
-      always() &&
-      (needs.update-data.result == 'success' || needs.update-data.result == 'skipped')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: Checkout repository (with latest CutoffData.lua)
