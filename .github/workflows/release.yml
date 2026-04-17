@@ -86,9 +86,9 @@ jobs:
       - name: Create and push auto tag
         run: |
           git fetch --tags
-          TAG="v$(date -u +'%Y.%m.%d.%H%M')"
+          TAG="vdata-$(date -u +'%Y-%m-%d')"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            TAG="${TAG}.${GITHUB_RUN_NUMBER}"
+            TAG="${TAG}-run${GITHUB_RUN_NUMBER}"
           fi
           git tag "$TAG"
           git push origin "$TAG"
