@@ -1,0 +1,16 @@
+## Interface: 120000
+## Title: Keystone Cutoffs
+## Notes: In-game Mythic+ title cutoff and percentile tracker.
+## Author: Xtendr
+## Version: @project-version@
+## IconTexture: Interface\AddOns\KeystoneCutoffs\Assets\KeystoneCutoffs_logo
+## SavedVariables: KeystoneCutoffsDB
+
+libs\LibStub\LibStub.lua
+libs\LibDBIcon-1.0\CallbackHandler-1.0\CallbackHandler-1.0.lua
+libs\LibSharedMedia-3.0\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
+libs\LibDBIcon-1.0\LibDataBroker-1.1\LibDataBroker-1.1.lua
+libs\LibDBIcon-1.0\LibDBIcon-1.0\LibDBIcon-1.0.lua
+
+CutoffData.lua
+KeystoneCutoffs.lua

@@ -1,0 +1,39 @@
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.swp
+*.swo
+*~
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Python (update_cutoffs.py)
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Local secrets
+api.txt
+secrets.txt
+*.secret
+
+# Packager / build output
+.release/
+release/
+*.zip
+
+# WoW client-only leftovers
+WTF/
+Cache/
