@@ -5,6 +5,7 @@
 ## Version: @project-version@
 ## IconTexture: Interface\AddOns\KeystoneCutoffs\Assets\KeystoneCutoffs_logo
 ## SavedVariables: KeystoneCutoffsDB
+## X-Curse-Project-ID: 1516987
 
 libs\LibStub\LibStub.lua
 libs\LibDBIcon-1.0\CallbackHandler-1.0\CallbackHandler-1.0.lua
