@@ -1,4 +1,4 @@
-## Interface: 120005
+## Interface: 120001, 120005
 ## Title: Keystone Cutoffs
 ## Notes: In-game Mythic+ title cutoff and percentile tracker.
 ## Author: Xtendr
