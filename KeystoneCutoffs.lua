@@ -1051,20 +1051,37 @@ local function CreatePanel()
     end)
     panel:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
-        -- Always persist the position as TOPLEFT relative to UIParent's BOTTOMLEFT.
-        -- This guarantees the panel shrinks/grows from its BOTTOM edge on collapse
-        -- (otherwise a CENTER/BOTTOM anchor causes it to "float" when height changes).
+        -- Persist drag offsets relative to ChallengesFrame so the panel still
+        -- follows Blizzard's UI panel push/stack behavior.
         local left, top = self:GetLeft(), self:GetTop()
         if left and top then
-            self:ClearAllPoints()
-            self:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
             KeystoneCutoffsDB = KeystoneCutoffsDB or {}
-            KeystoneCutoffsDB.panelPosition = {
-                point    = "TOPLEFT",
-                relPoint = "BOTTOMLEFT",
-                x        = math.floor(left + 0.5),
-                y        = math.floor(top  + 0.5),
-            }
+            local cfRight = ChallengesFrame and ChallengesFrame:GetRight()
+            local cfTop   = ChallengesFrame and ChallengesFrame:GetTop()
+
+            if cfRight and cfTop then
+                local xOff = math.floor((left - cfRight) + 0.5)
+                local yOff = math.floor((top  - cfTop)   + 0.5)
+                self:ClearAllPoints()
+                self:SetPoint("TOPLEFT", ChallengesFrame, "TOPRIGHT", xOff, yOff)
+                KeystoneCutoffsDB.panelPosition = {
+                    point    = "TOPLEFT",
+                    relTo    = "ChallengesFrame",
+                    relPoint = "TOPRIGHT",
+                    x        = xOff,
+                    y        = yOff,
+                }
+            else
+                -- Fallback for edge cases where ChallengesFrame geometry isn't available.
+                self:ClearAllPoints()
+                self:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+                KeystoneCutoffsDB.panelPosition = {
+                    point    = "TOPLEFT",
+                    relPoint = "BOTTOMLEFT",
+                    x        = math.floor(left + 0.5),
+                    y        = math.floor(top  + 0.5),
+                }
+            end
         end
     end)
 
@@ -1183,11 +1200,22 @@ PositionPanel = function()
     local db = KeystoneCutoffsDB or {}
     local custom = db.panelPosition
     if type(custom) == "table" and custom.point then
-        -- User-dragged override: anchor to UIParent so the panel stays put even
-        -- when ChallengesFrame repositions itself.
-        panel:SetPoint(custom.point, UIParent, custom.relPoint or custom.point,
-                       custom.x or 0, custom.y or 0)
-        return
+        -- New schema: anchor to ChallengesFrame so panel follows panel-push.
+        if custom.relTo == "ChallengesFrame" and ChallengesFrame then
+            panel:SetPoint(custom.point, ChallengesFrame, custom.relPoint or "TOPRIGHT",
+                           custom.x or 0, custom.y or 0)
+            return
+        end
+        -- Legacy schema from older builds used absolute UIParent anchoring
+        -- (relPoint=BOTTOMLEFT), which breaks panel-push behavior. Migrate by
+        -- clearing it once so default anchoring is restored automatically.
+        if custom.relPoint == "BOTTOMLEFT" then
+            db.panelPosition = nil
+        else
+            panel:SetPoint(custom.point, UIParent, custom.relPoint or custom.point,
+                           custom.x or 0, custom.y or 0)
+            return
+        end
     end
 
     local pos = db.position or "RIGHT"
