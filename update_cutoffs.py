@@ -22,6 +22,21 @@ REGIONS = ["eu", "us", "kr", "tw"]
 SEASON   = "season-mn-1"
 BASE_URL = "https://raider.io/api/v1/mythic-plus/season-cutoffs"
 SCORE_TIERS_URL = "https://raider.io/api/v1/mythic-plus/score-tiers"
+RUNS_URL = "https://raider.io/api/v1/mythic-plus/runs"
+
+# Dungeons active in season-mn-1.
+# challengeModeID matches icon.mapID used by C_MythicPlus.GetSeasonBestForMap().
+# Verified against Raider.IO static-data API (expansion_id=11).
+SEASON_DUNGEONS = [
+    {"slug": "algethar-academy",         "name": "Algeth'ar Academy",       "challengeModeID": 402},
+    {"slug": "magisters-terrace",        "name": "Magisters' Terrace",      "challengeModeID": 558},
+    {"slug": "maisara-caverns",          "name": "Maisara Caverns",         "challengeModeID": 560},
+    {"slug": "nexuspoint-xenas",         "name": "Nexus-Point Xenas",       "challengeModeID": 559},
+    {"slug": "pit-of-saron",            "name": "Pit of Saron",            "challengeModeID": 556},
+    {"slug": "seat-of-the-triumvirate",  "name": "Seat of the Triumvirate", "challengeModeID": 239},
+    {"slug": "skyreach",                "name": "Skyreach",                "challengeModeID": 161},
+    {"slug": "windrunner-spire",        "name": "Windrunner Spire",        "challengeModeID": 557},
+]
 
 # Estimated date the season ends (used as a display hint in the Lua table).
 SEASON_END_DATE = "September 1, 2026"
@@ -159,7 +174,99 @@ def normalize_score_tiers(tiers: list) -> list:
     return entries
 
 
-def build_lua(all_data: dict, score_colors: list) -> str:
+def fetch_dungeon_benchmark(region: str, dungeon_slug: str, title_count: int) -> int | None:
+    """Return the key level at the title-count position in the per-dungeon leaderboard.
+
+    How it works
+    ------------
+    The per-dungeon runs leaderboard is sorted best-first (one entry per
+    character's best run in that dungeon).  Position title_count represents the
+    player ranked at the exact title boundary in that specific dungeon, which
+    approximates the key level a typical title-caliber player has completed there.
+
+    We use the exact quantilePopulationCount from Raider.IO (not a derived value)
+    and fetch the single leaderboard page that contains that position.  If the
+    page is empty (leaderboard shorter than title_count), we walk backward to the
+    last available entry.
+    """
+    if title_count <= 0:
+        return None
+
+    # Raider.IO pages are 0-indexed, 20 runs each.
+    page = (title_count - 1) // 20
+    pos  = (title_count - 1) % 20
+
+    for attempt_page in range(page, max(-1, page - 10), -1):
+        if attempt_page < 0:
+            break
+        url = (f"{RUNS_URL}?season={SEASON}&region={region}"
+               f"&dungeon={dungeon_slug}&affixes=all&page={attempt_page}")
+        req = urllib.request.Request(url, headers=build_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            rankings = payload.get("rankings", [])
+            if not rankings:
+                continue                            # page empty – try one page earlier
+            # Use the requested position if on the target page, otherwise last entry.
+            idx   = pos if attempt_page == page else len(rankings) - 1
+            entry = rankings[min(idx, len(rankings) - 1)]
+            level = entry.get("run", {}).get("mythic_level")
+            return int(level) if level is not None else None
+        except urllib.error.HTTPError as exc:
+            print(f"    [WARN] HTTP {exc.code} – {dungeon_slug}/{region}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"    [WARN] Benchmark fetch failed {dungeon_slug}/{region}: {exc}",
+                  file=sys.stderr)
+        break   # non-empty-page errors are not retried
+
+    return None
+
+
+def fetch_all_dungeon_benchmarks(all_data: dict) -> dict:
+    """Fetch the title-boundary key level per dungeon per region.
+
+    The benchmark key is the level at position title_count in the per-dungeon
+    leaderboard, i.e. what a player ranked exactly at the title boundary has
+    done in each dungeon.  This reflects what a typical title player actually
+    completes, accounting for the fact that different players compensate across
+    different dungeons.
+
+    Returns { region: { challengeModeID: keyLevel, ... }, ... }
+    """
+    benchmarks: dict = {}
+
+    for region in REGIONS:
+        payload  = all_data.get(region, {})
+        cutoffs  = payload.get("cutoffs", {})
+        p999_all = cutoffs.get("p999", {}).get("all", {})
+
+        # Use the exact player count that Raider.IO reports directly.
+        title_count = int(p999_all.get("quantilePopulationCount", 0))
+
+        if title_count <= 0:
+            print(f"  [WARN] No p999 population count for {region}, skipping benchmarks.")
+            continue
+
+        print(f"  {region}: {title_count} title players – "
+              f"fetching {len(SEASON_DUNGEONS)} dungeon benchmarks …")
+
+        region_data: dict = {}
+        for dungeon in SEASON_DUNGEONS:
+            level = fetch_dungeon_benchmark(region, dungeon["slug"], title_count)
+            if level is not None:
+                region_data[dungeon["challengeModeID"]] = level
+                print(f"    {dungeon['name']}: +{level}")
+            else:
+                print(f"    {dungeon['name']}: (no data)")
+
+        if region_data:
+            benchmarks[region] = region_data
+
+    return benchmarks
+
+
+def build_lua(all_data: dict, score_colors: list, dungeon_benchmarks: dict) -> str:
     """Convert the collected API data into a Lua table string."""
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -233,6 +340,19 @@ def build_lua(all_data: dict, score_colors: list) -> str:
             f'        {{ score = {lua_number(entry["score"])}, color = "{entry["color"]}" }},'
         )
     lines.append("    },")
+    lines.append("    -- Per-dungeon key level at the title (top 0.1%) boundary.")
+    lines.append("    -- Key = in-game challenge mode ID (icon.mapID). Updated daily.")
+    lines.append("    dungeonBenchmarks = {")
+    for region in REGIONS:
+        rdata = dungeon_benchmarks.get(region)
+        if not rdata:
+            lines.append(f"        [{region!r}] = {{}},  -- no data")
+            continue
+        lines.append(f"        [{region!r}] = {{")
+        for cmid, level in sorted(rdata.items()):
+            lines.append(f"            [{cmid}] = {level},")
+        lines.append("        },")
+    lines.append("    },")
     lines.append("}")        # end KeystoneCutoffsData
     lines.append("")         # trailing newline
 
@@ -269,7 +389,10 @@ def main() -> None:
     score_colors = normalize_score_tiers(score_tiers)
     score_colors.sort(key=lambda entry: entry["score"], reverse=True)
 
-    lua_content = build_lua(all_data, score_colors)
+    print("Fetching per-dungeon title-pace benchmarks …")
+    dungeon_benchmarks = fetch_all_dungeon_benchmarks(all_data)
+
+    lua_content = build_lua(all_data, score_colors, dungeon_benchmarks)
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as fh:
         fh.write(lua_content)

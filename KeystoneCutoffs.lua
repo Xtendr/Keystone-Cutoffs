@@ -12,8 +12,10 @@ local DB_DEFAULTS = {
     showMythThreshold = true,
     showSeasonEnd     = true,
     showDungeonScores = true,
+    showDungeonPace   = false,
     compactMode       = false,
     position          = "RIGHT",   -- "RIGHT" | "BOTTOM"
+    dataRegion        = "auto",    -- "auto" | "eu" | "us"
     -- Customize (dungeon score overlays)
     overlayFont       = "Friz Quadrata TT",
     overlayScoreSize  = 14,
@@ -36,6 +38,20 @@ local C = {
 local function col(colour, text)
     return colour .. tostring(text) .. C.reset
 end
+
+-- ─── Season dungeon list (challenge mode IDs + display info) ─────────────────
+-- Order matches the Raider.IO tooltip convention (same short names).
+-- challengeModeID = icon.mapID used by C_MythicPlus.GetSeasonBestForMap().
+local DUNGEON_PACE_DATA = {
+    { mapID = 161,  short = "SR",   name = "Skyreach"               },
+    { mapID = 239,  short = "SEAT", name = "Seat of the Triumvirate" },
+    { mapID = 402,  short = "AA",   name = "Algeth'ar Academy"      },
+    { mapID = 559,  short = "NPX",  name = "Nexus-Point Xenas"      },
+    { mapID = 556,  short = "POS",  name = "Pit of Saron"           },
+    { mapID = 560,  short = "MC",   name = "Maisara Caverns"        },
+    { mapID = 558,  short = "MT",   name = "Magisters' Terrace"     },
+    { mapID = 557,  short = "WS",   name = "Windrunner Spire"       },
+}
 
 local function fmt(n)
     if type(n) ~= "number" then return "N/A" end
@@ -124,6 +140,7 @@ local panel
 local PositionPanel
 local UpdatePanel
 local UpdateDungeonOverlays
+local getDungeonBenchmark
 
 -- ─── Custom Settings Window ──────────────────────────────────────────────────
 -- Styling tokens (dark theme with gold accent)
@@ -895,7 +912,9 @@ local function CreateSettingsWindow()
     local _, hD2 = makeKCCheckbox(display, dy, "showSeasonEnd",     "Show Estimated Season End"); dy = dy - hD2 - 6
     local _, hD3 = makeKCCheckbox(display, dy, "showDungeonScores", "Show Dungeon Score Overlays",
         function() UpdateDungeonOverlays() end); dy = dy - hD3 - 6
-    local _, hD4 = makeKCCheckbox(display, dy, "compactMode",       "Compact Mode"); dy = dy - hD4 - 6
+    local _, hD4 = makeKCCheckbox(display, dy, "showDungeonPace",   "Show Dungeon Pace",
+        function() UpdatePanel() end); dy = dy - hD4 - 6
+    local _, hD5cb = makeKCCheckbox(display, dy, "compactMode",     "Compact Mode"); dy = dy - hD5cb - 6
 
     local _, hD5 = makeKCCheckboxCustom(display, dy, "Show Minimap Button",
         function()
@@ -908,6 +927,16 @@ local function CreateSettingsWindow()
         end,
         function() if UpdateMinimapButton then UpdateMinimapButton() end end)
     dy = dy - hD5 - 10
+
+    divider(display, dy); dy = dy - 14
+    sectionLabel(display, "DATA REGION", dy); dy = dy - 18
+
+    local hDRegion = makeKCDropdown(display, dy, "dataRegion", "Region", {
+        { value = "auto", label = "Auto-detect" },
+        { value = "eu",   label = "EU" },
+        { value = "us",   label = "US" },
+    }, function() UpdatePanel() end)
+    dy = dy - hDRegion - 14
 
     divider(display, dy); dy = dy - 14
     sectionLabel(display, "POSITION", dy); dy = dy - 18
@@ -1175,6 +1204,132 @@ local function CreatePanel()
     panel.seasonTooltipHit = seasonHit
     dataFrames[#dataFrames + 1] = seasonHit
 
+    -- ── Dungeon pace section (optional, positioned by relayoutPanel) ───────────
+    local paceDivider = panel:CreateTexture(nil, "BACKGROUND")
+    paceDivider:SetHeight(1)
+    paceDivider:SetColorTexture(0.25, 0.25, 0.25, 0.7)
+    panel.paceDivider = paceDivider
+    dataFrames[#dataFrames + 1] = paceDivider
+
+    local paceHeader = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    paceHeader:SetJustifyH("LEFT")
+    paceHeader:SetText(col(C.gold, "Dungeon Pace"))
+    panel.paceHeader = paceHeader
+    dataFrames[#dataFrames + 1] = paceHeader
+
+    local paceHeaderHit = CreateFrame("Frame", nil, panel)
+    paceHeaderHit:SetFrameLevel(panel:GetFrameLevel() + 20)
+    paceHeaderHit:EnableMouse(true)
+    do
+        local hi = paceHeaderHit:CreateTexture(nil, "ARTWORK")
+        hi:SetAllPoints(paceHeaderHit)
+        hi:SetColorTexture(1, 1, 1, 0.08)
+        hi:Hide()
+        paceHeaderHit._highlightTex = hi
+        paceHeaderHit:SetScript("OnEnter", function(self)
+            if self._highlightTex then self._highlightTex:Show() end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:ClearLines()
+            GameTooltip:SetText("Dungeon Pace", 1, 0.82, 0)
+            GameTooltip:AddLine(
+                "Compares your best key level per dungeon to what"
+                .. " title players (Top 0.1%) typically complete.",
+                1, 1, 1, true)
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Gap color:", 0.65, 0.65, 0.65)
+            GameTooltip:AddLine(" ")
+            -- |T| extended syntax: path:h:w:xOff:yOff:fileW:fileH:l:r:t:b:R:G:B
+            -- Tints the white circle texture with each gap colour at runtime.
+            local function circleIcon(R, G, B)
+                return string.format(
+                    "|TInterface\\AddOns\\KeystoneCutoffs\\Assets\\circle:10:10:0:0:64:64:0:64:0:64:%d:%d:%d|t",
+                    R, G, B)
+            end
+            GameTooltip:AddLine(circleIcon(68,  255, 68)  .. "  On pace or ahead")
+            GameTooltip:AddLine(circleIcon(255, 153, 51)  .. "  1 key behind")
+            GameTooltip:AddLine(circleIcon(255, 68,  68)  .. "  2+ keys behind")
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Data sourced from Raider.IO, updated daily.",
+                0.55, 0.55, 0.55)
+            GameTooltip:Show()
+        end)
+        paceHeaderHit:SetScript("OnLeave", function(self)
+            if self._highlightTex then self._highlightTex:Hide() end
+            GameTooltip:Hide()
+        end)
+    end
+    panel.paceHeaderHit = paceHeaderHit
+    dataFrames[#dataFrames + 1] = paceHeaderHit
+
+    local paceRows = {}
+    for i = 1, #DUNGEON_PACE_DATA do
+        local d = DUNGEON_PACE_DATA[i]
+        local L, V = createSplitRow(panel, 0)
+
+        -- Invisible hitbox for tooltip — positioned by relayoutPanel each frame.
+        local hb = CreateFrame("Frame", nil, panel)
+        hb:SetFrameLevel(panel:GetFrameLevel() + 20)
+        hb:EnableMouse(true)
+        local hiTex = hb:CreateTexture(nil, "ARTWORK")
+        hiTex:SetAllPoints(hb)
+        hiTex:SetColorTexture(1, 1, 1, 0.06)
+        hiTex:Hide()
+        hb:SetScript("OnEnter", function(self)
+            hiTex:Show()
+            -- Gather live data for this dungeon
+            local playerLevel, isTimed
+            if C_MythicPlus and C_MythicPlus.GetSeasonBestForMap then
+                local ok, inTime, overtime = pcall(C_MythicPlus.GetSeasonBestForMap, d.mapID)
+                if ok then
+                    local run = inTime or overtime
+                    if run then
+                        playerLevel = run.level
+                        isTimed     = (inTime ~= nil)
+                    end
+                end
+            end
+            local benchmark = getDungeonBenchmark(d.mapID)
+
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(d.name, 1, 0.82, 0)
+            if playerLevel then
+                local timedStr = isTimed
+                    and "|cFF44FF44in time|r"
+                    or  "|cFFAAAAAA overtime|r"
+                GameTooltip:AddDoubleLine("Your best",
+                    string.format("|cFFFFFFFF+%d|r  %s", playerLevel, timedStr),
+                    0.65, 0.65, 0.65, 1, 1, 1)
+            else
+                GameTooltip:AddLine("|cFF888888No run recorded this season|r")
+            end
+            if benchmark then
+                GameTooltip:AddDoubleLine("Title typical",
+                    string.format("|cFFFFD100+%d|r", benchmark),
+                    0.65, 0.65, 0.65, 1, 1, 1)
+            end
+            if benchmark and playerLevel then
+                local gap = playerLevel - benchmark
+                local gapColor = gap >= 0 and "|cFF44FF44"
+                    or (gap >= -1 and "|cFFFF9933" or "|cFFFF4444")
+                local sign = gap >= 0 and "+" or ""
+                GameTooltip:AddDoubleLine("Gap",
+                    string.format("%s%s%d keys|r", gapColor, sign, gap),
+                    0.65, 0.65, 0.65, 1, 1, 1)
+            end
+            GameTooltip:Show()
+        end)
+        hb:SetScript("OnLeave", function()
+            hiTex:Hide()
+            GameTooltip:Hide()
+        end)
+
+        paceRows[i] = { L = L, V = V, hitbox = hb }
+        dataFrames[#dataFrames + 1] = L
+        dataFrames[#dataFrames + 1] = V
+        dataFrames[#dataFrames + 1] = hb
+    end
+    panel.paceRows = paceRows
+
     -- ── Collapse toggle ───────────────────────────────────────────────────────
     collapseBtn:SetScript("OnClick", function()
         panel.collapsed = not panel.collapsed
@@ -1236,6 +1391,15 @@ local function GetRegion()
     return regionMap[GetCurrentRegion() or 3] or "eu"
 end
 
+-- Returns the region to use for data lookups: manual setting if configured,
+-- otherwise the auto-detected game region.
+local function GetDataRegion()
+    local db = KeystoneCutoffsDB or {}
+    local setting = db.dataRegion
+    if setting and setting ~= "auto" then return setting end
+    return GetRegion()
+end
+
 -- ─── Dynamic panel relayout ───────────────────────────────────────────────────
 -- Repositions all split-row FontStrings based on current DB settings,
 -- shows/hides toggleable rows, and sets panel:SetHeight() accordingly.
@@ -1289,6 +1453,15 @@ local function relayoutPanel()
         hideRow(split.updatedL, split.updatedV)
         if panel.seasonTooltipHit then panel.seasonTooltipHit:Hide() end
 
+        -- Also hide the dungeon pace section.
+        if panel.paceDivider  then panel.paceDivider:SetShown(false)  end
+        if panel.paceHeader   then panel.paceHeader:SetShown(false)   end
+        if panel.paceHeaderHit then panel.paceHeaderHit:SetShown(false) end
+        for _, row in ipairs(panel.paceRows or {}) do
+            row.L:SetShown(false); row.V:SetShown(false)
+            if row.hitbox then row.hitbox:SetShown(false) end
+        end
+
         -- y is currently under the last visible cutoff row with ROW_GAP applied;
         -- snap it back to align the bottom padding.
         y = y + ROW_GAP
@@ -1314,9 +1487,58 @@ local function relayoutPanel()
 
     -- updated (always visible when not compact)
     placeRow(split.updatedL, split.updatedV)
+    y = y - ROW_H  -- advance below the updated row
 
-    -- Dynamic height: y is at the top of updated row; bottom = y - ROW_H
-    local newH = math.ceil(-y + ROW_H + BOTTOM_PAD)
+    -- ── Dungeon pace (optional section) ───────────────────────────────────────
+    local PACE_ROW_H   = 16
+    local PACE_ROW_GAP = 1
+
+    if db.showDungeonPace and panel.paceRows and #panel.paceRows > 0 then
+        y = y - SECTION_GAP
+
+        panel.paceDivider:SetShown(true)
+        panel.paceDivider:ClearAllPoints()
+        panel.paceDivider:SetPoint("TOPLEFT",  panel, "TOPLEFT",  PAD, y)
+        panel.paceDivider:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -PAD, y)
+        y = y - 1 - 5  -- 1px line + spacing
+
+        panel.paceHeader:SetShown(true)
+        panel.paceHeader:ClearAllPoints()
+        panel.paceHeader:SetPoint("TOPLEFT", panel, "TOPLEFT", PAD, y)
+        if panel.paceHeaderHit then
+            panel.paceHeaderHit:SetShown(true)
+            panel.paceHeaderHit:ClearAllPoints()
+            panel.paceHeaderHit:SetPoint("TOPLEFT",     panel, "TOPLEFT",  PAD - 2, y + 2)
+            panel.paceHeaderHit:SetPoint("BOTTOMRIGHT", panel, "TOPRIGHT", -PAD + 2, y - SECTION_TITLE_H)
+        end
+        y = y - SECTION_TITLE_H - 3
+
+        for i, row in ipairs(panel.paceRows) do
+            row.L:SetShown(true); row.V:SetShown(true)
+            row.L:ClearAllPoints(); row.L:SetPoint("TOPLEFT",  panel, "TOPLEFT",  PAD, y)
+            row.V:ClearAllPoints(); row.V:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -PAD, y)
+            if row.hitbox then
+                row.hitbox:SetShown(true)
+                row.hitbox:ClearAllPoints()
+                row.hitbox:SetPoint("TOPLEFT",     panel, "TOPLEFT",  PAD - 2, y + 1)
+                row.hitbox:SetPoint("BOTTOMRIGHT", panel, "TOPRIGHT", -PAD + 2, y - PACE_ROW_H + 1)
+            end
+            if i < #panel.paceRows then
+                y = y - PACE_ROW_H - PACE_ROW_GAP
+            end
+        end
+        y = y - PACE_ROW_H  -- below the last pace row
+    else
+        panel.paceDivider:SetShown(false)
+        panel.paceHeader:SetShown(false)
+        if panel.paceHeaderHit then panel.paceHeaderHit:SetShown(false) end
+        for _, row in ipairs(panel.paceRows or {}) do
+            row.L:SetShown(false); row.V:SetShown(false)
+            if row.hitbox then row.hitbox:SetShown(false) end
+        end
+    end
+
+    local newH = math.ceil(-y + BOTTOM_PAD)
     panel.expandedHeight = newH
     panel:SetHeight(newH)
 end
@@ -1346,7 +1568,7 @@ UpdatePanel = function()
         return
     end
 
-    local region     = GetRegion()
+    local region     = GetDataRegion()
     local regionData = KeystoneCutoffsData.regions and KeystoneCutoffsData.regions[region]
     if not regionData then
         panel.subtitle:SetText("")
@@ -1369,22 +1591,22 @@ UpdatePanel = function()
     -- Top 0.1%: left = target context, right = actionable gap
     if p999 and p999.score then
         local gap01 = math.max(0, p999.score - myScore)
-        split.gap01L:SetText(string.format("Top 0.1%% (%s)", fmt(p999.score)))
+        split.gap01L:SetText(col(C.white, "Top 0.1%") .. col(C.grey, " (" .. fmt(p999.score) .. ")"))
         split.gap01V:SetText(string.format("%s+ |r%s%s|r",
             C.white, scoreColorFor(p999.score), fmt(gap01)))
     else
-        split.gap01L:SetText("Top 0.1% (—)")
+        split.gap01L:SetText(col(C.white, "Top 0.1%") .. col(C.grey, " (-)"))
         split.gap01V:SetText(col(C.grey, "—"))
     end
 
     -- Top 1%: left = target context, right = actionable gap
     if p990 and p990.score then
         local gap1 = math.max(0, p990.score - myScore)
-        split.gap1L:SetText(string.format("Top 1%% (%s)", fmt(p990.score)))
+        split.gap1L:SetText(col(C.white, "Top 1%") .. col(C.grey, " (" .. fmt(p990.score) .. ")"))
         split.gap1V:SetText(string.format("%s+ |r%s%s|r",
             C.white, scoreColorFor(p990.score), fmt(gap1)))
     else
-        split.gap1L:SetText("Top 1% (—)")
+        split.gap1L:SetText(col(C.white, "Top 1%") .. col(C.grey, " (—)"))
         split.gap1V:SetText(col(C.grey, "—"))
     end
 
@@ -1393,11 +1615,11 @@ UpdatePanel = function()
     local myth   = titles["keystoneMyth"]
     if myth and myth.fixedScore then
         local mythGap = math.max(0, myth.fixedScore - myScore)
-        split.mythL:SetText(string.format("Keystone Myth (%s)", fmt(myth.fixedScore)))
+        split.mythL:SetText(col(C.white, "Keystone Myth") .. col(C.grey, " (" .. fmt(myth.fixedScore) .. ")"))
         split.mythV:SetText(string.format("%s+ |r%s%s|r",
             C.white, scoreColorFor(myth.fixedScore), fmt(mythGap)))
     else
-        split.mythL:SetText("Keystone Myth (—)")
+        split.mythL:SetText(col(C.white, "Keystone Myth") .. col(C.grey, " (—)"))
         split.mythV:SetText(col(C.grey, "—"))
     end
 
@@ -1437,8 +1659,67 @@ UpdatePanel = function()
     end
     split.updatedV:SetText(staleColor .. dateOnly .. staleSuffix .. "|r")
 
+    -- ── Dungeon pace rows ──────────────────────────────────────────────────────
+    if db.showDungeonPace and panel.paceRows then
+        for i, row in ipairs(panel.paceRows) do
+            local d = DUNGEON_PACE_DATA[i]
+
+            local playerLevel, isTimed
+            if C_MythicPlus and C_MythicPlus.GetSeasonBestForMap then
+                local ok, inTime, overtime = pcall(C_MythicPlus.GetSeasonBestForMap, d.mapID)
+                if ok then
+                    local run = inTime or overtime
+                    if run then
+                        playerLevel = run.level
+                        isTimed     = (inTime ~= nil)
+                    end
+                end
+            end
+
+            local benchmark = getDungeonBenchmark(d.mapID)
+
+            -- Left: abbreviated name + player's key level
+            if playerLevel then
+                local keyColor = isTimed and C.white or C.grey
+                row.L:SetText(string.format("%-4s  %s+%d|r", d.short, keyColor, playerLevel))
+            else
+                row.L:SetText(string.format("%-4s  %s—|r", d.short, C.grey))
+            end
+            row.L:SetTextColor(0.75, 0.75, 0.75, 1)
+
+            -- Right: colored gap vs title typical
+            if benchmark and playerLevel then
+                local gap = playerLevel - benchmark
+                local gapColor
+                if gap >= 0 then
+                    gapColor = "|cFF44FF44"
+                elseif gap == -1 then
+                    gapColor = "|cFFFF9933"
+                else
+                    gapColor = "|cFFFF4444"
+                end
+                local sign = gap >= 0 and "+" or ""
+                row.V:SetText(gapColor .. sign .. gap .. "|r")
+            elseif benchmark then
+                row.V:SetText(col(C.grey, "—"))
+            else
+                row.V:SetText("")
+            end
+        end
+    end
+
     relayoutPanel()
     UpdateDungeonOverlays()
+end
+
+-- ─── Per-dungeon title-pace benchmark ────────────────────────────────────────
+-- Returns the title-boundary key level for mapID in the player's region,
+-- or nil if the data isn't available yet (first load before a data update).
+getDungeonBenchmark = function(mapID)
+    if not KeystoneCutoffsData or not KeystoneCutoffsData.dungeonBenchmarks then return nil end
+    local regionBenchmarks = KeystoneCutoffsData.dungeonBenchmarks[GetDataRegion()]
+    if not regionBenchmarks then return nil end
+    return regionBenchmarks[mapID]
 end
 
 -- ─── Dungeon score overlays ───────────────────────────────────────────────────
@@ -1563,6 +1844,57 @@ local function refreshDungeonOverlays()
                         ov.time:SetText(fmtTime(dur) or "")
                     end
                 end
+            end
+
+            -- ── Title-pace tooltip (hooked once per icon) ──────────────────
+            if not icon._kcTitlePaceHooked then
+                icon:HookScript("OnEnter", function(self)
+                    local mid = self.mapID
+                    if not mid then return end
+                    local benchmark = getDungeonBenchmark(mid)
+                    if not benchmark then return end
+
+                    local playerLevel
+                    if C_MythicPlus and C_MythicPlus.GetSeasonBestForMap then
+                        local ok, inT, outT = pcall(C_MythicPlus.GetSeasonBestForMap, mid)
+                        if ok then
+                            local run = inT or outT
+                            playerLevel = run and run.level
+                        end
+                    end
+
+                    local tt = GameTooltip
+                    if not tt:IsShown() then
+                        tt:SetOwner(self, "ANCHOR_RIGHT")
+                    end
+                    tt:AddLine(" ")
+                    tt:AddLine(col(C.gold, "Title Players") .. " |cFF888888(Top 0.1%)|r")
+                    tt:AddDoubleLine("Typical key", col(C.gold, "+" .. benchmark),
+                        0.65, 0.65, 0.65, 1, 1, 1)
+                    if playerLevel then
+                        tt:AddDoubleLine("Your best", col(C.white, "+" .. playerLevel),
+                            0.65, 0.65, 0.65, 1, 1, 1)
+                        local gap = playerLevel - benchmark
+                        local gapColor, gapStr
+                        if gap >= 0 then
+                            gapColor = "|cFF44FF44"
+                            gapStr   = "+" .. gap
+                        elseif gap == -1 then
+                            gapColor = "|cFFFF9933"
+                            gapStr   = tostring(gap)
+                        else
+                            gapColor = "|cFFFF4444"
+                            gapStr   = tostring(gap)
+                        end
+                        local unit = math.abs(gap) == 1 and " key" or " keys"
+                        tt:AddDoubleLine("Gap", gapColor .. gapStr .. unit .. "|r",
+                            0.65, 0.65, 0.65, 1, 1, 1)
+                    else
+                        tt:AddLine("|cFF888888No run recorded this season|r")
+                    end
+                    tt:Show()
+                end)
+                icon._kcTitlePaceHooked = true
             end
         end
     end
