@@ -71,6 +71,17 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
 
+      - name: Create local auto tag for daily release type
+        if: github.event_name != 'push'
+        run: |
+          git fetch --tags
+          TAG="vdata-$(date -u +'%Y-%m-%d')"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            TAG="${TAG}-run${GITHUB_RUN_NUMBER}"
+          fi
+          git tag "$TAG"
+          echo "Using local release tag: $TAG"
+
       - name: Build and release with BigWigs packager
         uses: BigWigsMods/packager@v2
         env:
