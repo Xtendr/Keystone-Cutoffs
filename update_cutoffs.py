@@ -49,7 +49,7 @@ def build_headers() -> dict:
     """Return request headers, injecting the API key if available."""
     headers = {
         "Accept": "application/json",
-        "User-Agent": "KeystoneCutoffs-WoW-Addon/1.2.0",
+        "User-Agent": "KeystoneCutoffs-WoW-Addon/1.2.1",
     }
     api_key = os.environ.get("RAIDER_IO_API_KEY", "").strip()
     if api_key:
