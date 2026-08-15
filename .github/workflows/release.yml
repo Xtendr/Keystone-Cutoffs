@@ -34,6 +34,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Run updater regression tests
+        run: python -m unittest discover -s tests -v
+
       - name: Run update_cutoffs.py
         env:
           RAIDER_IO_API_KEY: ${{ secrets.RAIDER_IO_API_KEY }}
@@ -61,7 +64,8 @@ jobs:
     if: |
       always() && (
         (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-        (github.event_name != 'push' && needs.update-data.outputs.data_changed == 'true')
+        (github.event_name == 'schedule' && needs.update-data.outputs.data_changed == 'true') ||
+        (github.event_name == 'workflow_dispatch' && needs.update-data.result == 'success')
       )
 
     steps:
@@ -75,12 +79,17 @@ jobs:
         if: github.event_name != 'push'
         run: |
           git fetch --tags
-          TAG="vdata-$(date -u +'%Y-%m-%d')"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="vmanual-$(date -u +'%Y-%m-%d')-run${GITHUB_RUN_NUMBER}"
+          else
+            TAG="vdata-$(date -u +'%Y-%m-%d')"
+          fi
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
             TAG="${TAG}-run${GITHUB_RUN_NUMBER}"
           fi
           git tag "$TAG"
-          echo "Using local release tag: $TAG"
+          git push origin "$TAG"
+          echo "Published release tag: $TAG"
 
       - name: Build and release with BigWigs packager
         uses: BigWigsMods/packager@v2

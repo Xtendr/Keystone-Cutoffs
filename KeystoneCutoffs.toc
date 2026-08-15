@@ -1,8 +1,8 @@
-## Interface: 120000, 120001, 120005, 120007
+## Interface: 120000, 120001, 120005, 120007, 120100
 ## Title: Keystone Cutoffs
 ## Notes: In-game Mythic+ title cutoff and percentile tracker.
 ## Author: Xtendr
-## Version: v1.1
+## Version: v1.2.0
 ## IconTexture: Interface\AddOns\KeystoneCutoffs\Assets\KeystoneCutoffs_logo
 ## SavedVariables: KeystoneCutoffsDB
 ## X-Curse-Project-ID: 1516987

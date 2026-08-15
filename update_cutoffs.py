@@ -19,27 +19,11 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 
 REGIONS = ["eu", "us", "kr", "tw"]
-SEASON   = "season-mn-1"
 BASE_URL = "https://raider.io/api/v1/mythic-plus/season-cutoffs"
 SCORE_TIERS_URL = "https://raider.io/api/v1/mythic-plus/score-tiers"
 RUNS_URL = "https://raider.io/api/v1/mythic-plus/runs"
-
-# Dungeons active in season-mn-1.
-# challengeModeID matches icon.mapID used by C_MythicPlus.GetSeasonBestForMap().
-# Verified against Raider.IO static-data API (expansion_id=11).
-SEASON_DUNGEONS = [
-    {"slug": "algethar-academy",         "name": "Algeth'ar Academy",       "challengeModeID": 402},
-    {"slug": "magisters-terrace",        "name": "Magisters' Terrace",      "challengeModeID": 558},
-    {"slug": "maisara-caverns",          "name": "Maisara Caverns",         "challengeModeID": 560},
-    {"slug": "nexuspoint-xenas",         "name": "Nexus-Point Xenas",       "challengeModeID": 559},
-    {"slug": "pit-of-saron",            "name": "Pit of Saron",            "challengeModeID": 556},
-    {"slug": "seat-of-the-triumvirate",  "name": "Seat of the Triumvirate", "challengeModeID": 239},
-    {"slug": "skyreach",                "name": "Skyreach",                "challengeModeID": 161},
-    {"slug": "windrunner-spire",        "name": "Windrunner Spire",        "challengeModeID": 557},
-]
-
-# Estimated date the season ends (used as a display hint in the Lua table).
-SEASON_END_DATE = "September 1, 2026"
+STATIC_DATA_URL = "https://raider.io/api/v1/mythic-plus/static-data?expansion_id=11"
+SEASON_OVERRIDE_ENV = "KEYSTONE_CUTOFFS_SEASON"
 
 # Percentile keys present in the Raider.io payload.
 PERCENTILE_KEYS = ["p999", "p990", "p900", "p750", "p600"]
@@ -65,7 +49,7 @@ def build_headers() -> dict:
     """Return request headers, injecting the API key if available."""
     headers = {
         "Accept": "application/json",
-        "User-Agent": "KeystoneCutoffs-WoW-Addon/1.0",
+        "User-Agent": "KeystoneCutoffs-WoW-Addon/1.2.0",
     }
     api_key = os.environ.get("RAIDER_IO_API_KEY", "").strip()
     if api_key:
@@ -73,9 +57,102 @@ def build_headers() -> dict:
     return headers
 
 
-def fetch_cutoffs(region: str) -> dict:
+def fetch_static_data() -> dict:
+    """Fetch Raider.IO's authoritative season schedule and dungeon pool."""
+    req = urllib.request.Request(STATIC_DATA_URL, headers=build_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
+        print(f"[ERROR] Could not fetch season metadata: {exc}", file=sys.stderr)
+        return {}
+
+
+def parse_api_datetime(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp returned by Raider.IO."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def select_release_season(static_data: dict, now: datetime | None = None) -> dict:
+    """Select the newest main season that has started in every supported region.
+
+    Midnight seasons roll out at different regional reset times. Waiting until
+    all four regions have started prevents a daily package from mixing seasons
+    or erasing regions that still return 404 for the new season.
+    """
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    seasons = [s for s in static_data.get("seasons", []) if s.get("is_main_season")]
+
+    override = os.environ.get(SEASON_OVERRIDE_ENV, "").strip()
+    if override:
+        for season in seasons:
+            if season.get("slug") == override:
+                return season
+        raise ValueError(f"Unknown season override: {override}")
+
+    eligible = []
+    for season in seasons:
+        starts = season.get("starts", {})
+        try:
+            global_start = max(parse_api_datetime(starts[region]) for region in REGIONS)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if global_start <= now:
+            eligible.append((global_start, season))
+
+    if not eligible:
+        raise ValueError("No main Mythic+ season has started in every supported region")
+    return max(eligible, key=lambda item: item[0])[1]
+
+
+def season_dungeons(season_info: dict) -> list:
+    """Return the release dungeon pool using in-game challenge mode IDs."""
+    dungeons = []
+    for dungeon in season_info.get("dungeons", []):
+        challenge_mode_id = dungeon.get("challenge_mode_id")
+        slug = dungeon.get("slug")
+        name = dungeon.get("name")
+        if challenge_mode_id is None or not slug or not name:
+            continue
+        dungeons.append({
+            "slug": slug,
+            "name": name,
+            "challengeModeID": int(challenge_mode_id),
+        })
+    if not dungeons:
+        raise ValueError(f"Season {season_info.get('slug', 'unknown')} has no valid dungeons")
+    return dungeons
+
+
+def format_end_date(value: str | None, now: datetime | None = None) -> str:
+    """Format a regional end date, rejecting Raider.IO's far-future sentinel."""
+    if not value:
+        return "Not announced"
+    try:
+        end = parse_api_datetime(value)
+    except (TypeError, ValueError):
+        return "Not announced"
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if end.year >= 2030 or (end - now).days > 730:
+        return "Not announced"
+    return f"{end.strftime('%B')} {end.day}, {end.year}"
+
+
+def regional_end_dates(season_info: dict, now: datetime | None = None) -> dict:
+    ends = season_info.get("ends", {})
+    return {region: format_end_date(ends.get(region), now) for region in REGIONS}
+
+
+def season_end_summary(region_ends: dict) -> str:
+    values = list(dict.fromkeys(region_ends.get(region, "Not announced") for region in REGIONS))
+    if len(values) == 1:
+        return values[0]
+    return "Varies by region"
+
+
+def fetch_cutoffs(region: str, season: str) -> dict:
     """Fetch cutoff data for *region* from the Raider.io API."""
-    url = f"{BASE_URL}?season={SEASON}&region={region}"
+    url = f"{BASE_URL}?season={season}&region={region}"
     headers = build_headers()
 
     req = urllib.request.Request(url, headers=headers)
@@ -121,9 +198,9 @@ def faction_block(data: dict, indent: str) -> str:
     )
 
 
-def fetch_score_tiers() -> list:
+def fetch_score_tiers(season: str) -> list:
     """Fetch the season's score tiers (includes rgb colors)."""
-    url = f"{SCORE_TIERS_URL}?season={SEASON}"
+    url = f"{SCORE_TIERS_URL}?season={season}"
     headers = build_headers()
 
     req = urllib.request.Request(url, headers=headers)
@@ -174,7 +251,9 @@ def normalize_score_tiers(tiers: list) -> list:
     return entries
 
 
-def fetch_dungeon_benchmark(region: str, dungeon_slug: str, title_count: int) -> int | None:
+def fetch_dungeon_benchmark(
+    region: str, dungeon_slug: str, title_count: int, season: str
+) -> int | None:
     """Return the key level at the title-count position in the per-dungeon leaderboard.
 
     How it works
@@ -199,7 +278,7 @@ def fetch_dungeon_benchmark(region: str, dungeon_slug: str, title_count: int) ->
     for attempt_page in range(page, max(-1, page - 10), -1):
         if attempt_page < 0:
             break
-        url = (f"{RUNS_URL}?season={SEASON}&region={region}"
+        url = (f"{RUNS_URL}?season={season}&region={region}"
                f"&dungeon={dungeon_slug}&affixes=all&page={attempt_page}")
         req = urllib.request.Request(url, headers=build_headers())
         try:
@@ -223,7 +302,9 @@ def fetch_dungeon_benchmark(region: str, dungeon_slug: str, title_count: int) ->
     return None
 
 
-def fetch_all_dungeon_benchmarks(all_data: dict) -> dict:
+def fetch_all_dungeon_benchmarks(
+    all_data: dict, season: str, dungeons: list
+) -> dict:
     """Fetch the title-boundary key level per dungeon per region.
 
     The benchmark key is the level at position title_count in the per-dungeon
@@ -249,11 +330,13 @@ def fetch_all_dungeon_benchmarks(all_data: dict) -> dict:
             continue
 
         print(f"  {region}: {title_count} title players – "
-              f"fetching {len(SEASON_DUNGEONS)} dungeon benchmarks …")
+              f"fetching {len(dungeons)} dungeon benchmarks …")
 
         region_data: dict = {}
-        for dungeon in SEASON_DUNGEONS:
-            level = fetch_dungeon_benchmark(region, dungeon["slug"], title_count)
+        for dungeon in dungeons:
+            level = fetch_dungeon_benchmark(
+                region, dungeon["slug"], title_count, season
+            )
             if level is not None:
                 region_data[dungeon["challengeModeID"]] = level
                 print(f"    {dungeon['name']}: +{level}")
@@ -266,7 +349,49 @@ def fetch_all_dungeon_benchmarks(all_data: dict) -> dict:
     return benchmarks
 
 
-def build_lua(all_data: dict, score_colors: list, dungeon_benchmarks: dict) -> str:
+def validate_cutoff_data(all_data: dict) -> list:
+    """Return validation errors that must block publication."""
+    errors = []
+    for region in REGIONS:
+        cutoffs = all_data.get(region, {}).get("cutoffs", {})
+        title = cutoffs.get("p999", {}).get("all", {})
+        if not cutoffs:
+            errors.append(f"{region}: missing cutoff table")
+        elif title.get("quantileMinValue") is None:
+            errors.append(f"{region}: missing top-0.1% score")
+        elif title.get("quantilePopulationCount") is None:
+            errors.append(f"{region}: missing top-0.1% population")
+    return errors
+
+
+def validate_benchmarks(all_data: dict, benchmarks: dict, dungeons: list) -> list:
+    """Require full dungeon coverage whenever a title population exists."""
+    errors = []
+    expected_ids = {dungeon["challengeModeID"] for dungeon in dungeons}
+    for region in REGIONS:
+        title = (
+            all_data.get(region, {})
+            .get("cutoffs", {})
+            .get("p999", {})
+            .get("all", {})
+        )
+        title_count = int(title.get("quantilePopulationCount", 0) or 0)
+        if title_count <= 0:
+            continue
+        present_ids = set(benchmarks.get(region, {}))
+        missing = sorted(expected_ids - present_ids)
+        if missing:
+            errors.append(f"{region}: missing dungeon benchmarks {missing}")
+    return errors
+
+
+def build_lua(
+    all_data: dict,
+    score_colors: list,
+    dungeon_benchmarks: dict,
+    season: str,
+    season_ends: dict,
+) -> str:
     """Convert the collected API data into a Lua table string."""
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -274,15 +399,21 @@ def build_lua(all_data: dict, score_colors: list, dungeon_benchmarks: dict) -> s
         "-- CutoffData.lua",
         "-- Auto-generated by update_cutoffs.py – do not edit manually.",
         f"-- Last updated : {now_utc}",
-        f"-- Season       : {SEASON}",
-        f"-- Season end   : {SEASON_END_DATE}",
+        f"-- Season       : {season}",
+        f"-- Season end   : {season_end_summary(season_ends)}",
         "",
         "KeystoneCutoffsData = {",
-        f'    seasonEnd = "{SEASON_END_DATE}",',
-        f'    updatedAt = "{now_utc}",',
-        f'    season    = "{SEASON}",',
-        "    regions   = {",
+        f'    seasonEnd = "{season_end_summary(season_ends)}",',
+        "    seasonEnds = {",
     ]
+    for region in REGIONS:
+        lines.append(f'        ["{region}"] = "{season_ends[region]}",')
+    lines.extend([
+        "    },",
+        f'    updatedAt = "{now_utc}",',
+        f'    season    = "{season}",',
+        "    regions   = {",
+    ])
 
     for region in REGIONS:
         payload = all_data.get(region, {})
@@ -370,32 +501,63 @@ def main() -> None:
     else:
         print("RAIDER_IO_API_KEY not set – sending unauthenticated requests.")
 
+    print("Fetching season schedule and dungeon pool …")
+    static_data = fetch_static_data()
+    if not static_data:
+        sys.exit(1)
+    try:
+        season_info = select_release_season(static_data)
+        season = season_info["slug"]
+        dungeons = season_dungeons(season_info)
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"[ERROR] Invalid season metadata: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    season_ends = regional_end_dates(season_info)
+    print(f"Selected {season} with {len(dungeons)} dungeons.")
+
     all_data: dict = {}
     for region in REGIONS:
         print(f"Fetching cutoffs for region: {region} …")
-        payload = fetch_cutoffs(region)
+        payload = fetch_cutoffs(region, season)
         if payload:
             all_data[region] = payload
             print(f"  OK – {len(payload.get('cutoffs', {}))} keys received.")
         else:
             print(f"  WARN – empty payload for {region}, region will be skipped in output.")
 
-    if not all_data:
-        print("No data fetched for any region. Aborting.", file=sys.stderr)
+    cutoff_errors = validate_cutoff_data(all_data)
+    if cutoff_errors:
+        print("Cutoff validation failed; preserving the existing file:", file=sys.stderr)
+        for error in cutoff_errors:
+            print(f"  - {error}", file=sys.stderr)
         sys.exit(1)
 
     print("Fetching score tiers for gradient data …")
-    score_tiers = fetch_score_tiers()
+    score_tiers = fetch_score_tiers(season)
     score_colors = normalize_score_tiers(score_tiers)
     score_colors.sort(key=lambda entry: entry["score"], reverse=True)
+    if not score_colors:
+        print("Score-tier validation failed; preserving the existing file.", file=sys.stderr)
+        sys.exit(1)
 
     print("Fetching per-dungeon title-pace benchmarks …")
-    dungeon_benchmarks = fetch_all_dungeon_benchmarks(all_data)
+    dungeon_benchmarks = fetch_all_dungeon_benchmarks(all_data, season, dungeons)
+    benchmark_errors = validate_benchmarks(all_data, dungeon_benchmarks, dungeons)
+    if benchmark_errors:
+        print("Benchmark validation failed; preserving the existing file:", file=sys.stderr)
+        for error in benchmark_errors:
+            print(f"  - {error}", file=sys.stderr)
+        sys.exit(1)
 
-    lua_content = build_lua(all_data, score_colors, dungeon_benchmarks)
+    lua_content = build_lua(
+        all_data, score_colors, dungeon_benchmarks, season, season_ends
+    )
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as fh:
+    temp_output = OUTPUT_FILE + ".tmp"
+    with open(temp_output, "w", encoding="utf-8") as fh:
         fh.write(lua_content)
+    os.replace(temp_output, OUTPUT_FILE)
 
     print(f"\nWrote {len(lua_content):,} bytes -> {OUTPUT_FILE}")
 

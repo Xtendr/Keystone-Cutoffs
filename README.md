@@ -7,7 +7,8 @@ Keystone Cutoffs brings live Raider.IO Mythic+ rating cutoffs directly into your
 ## Features
 
 * **Live Region Cutoffs:** Tracks the exact Mythic+ rating needed for the top 0.1% title, plus the 1%, 10%, and 25% brackets.
-* **Daily Automated Updates:** Cutoff data is automatically refreshed daily from Raider.IO, ensuring you always have accurate targets to push for.
+* **Daily Automated Updates:** Cutoff data is refreshed daily from Raider.IO. Every region and derived dataset is validated before a release can replace the previous known-good file.
+* **Automatic Season Rollover:** The updater reads Raider.IO's regional season schedule and dungeon pool, then switches only after the new season is available in every supported region.
 * **Dungeon Score Overlays:** Enhances the native Mythic+ UI by overlaying your best score and time directly onto the dungeon icons.
 * **Native Rarity Colors:** Dungeon scores are color-coded automatically based on Blizzard's official keystone level rarity (Green for +2, Blue for +3-5, Purple, Orange).
 * **Compact & Draggable:** A clean, draggable main panel that can be collapsed or put into "Compact Mode" to save screen space when you only want to see the essentials.
@@ -28,3 +29,7 @@ You can install Keystone Cutoffs via [CurseForge](https://www.curseforge.com/wow
 ## Feedback & Issues
 
 Have suggestions, bug reports, or feature requests? Please open an issue on GitHub or leave a comment on CurseForge!
+
+## Data release safety
+
+Daily releases fail closed: incomplete regional cutoffs, missing score colors, or partial dungeon benchmarks stop publication and preserve the last valid `CutoffData.lua`. A maintainer can set `KEYSTONE_CUTOFFS_SEASON` for an explicit, validated season override when needed.

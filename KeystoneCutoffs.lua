@@ -1199,8 +1199,8 @@ local function CreatePanel()
     seasonHit:SetPoint("TOPLEFT",     split.seasonL, "TOPLEFT",     -4,  4)
     seasonHit:SetPoint("BOTTOMRIGHT", split.seasonV, "BOTTOMRIGHT",  4, -4)
     seasonHit:SetFrameLevel(tipLevel)
-    wireTooltipHitbox(seasonHit, "Estimated Season End",
-        "Blizzard has not officially announced the end date. This is an estimate based on historical season lengths.")
+    wireTooltipHitbox(seasonHit, "Season End",
+        "Shows the published end date for your selected data region. Regional reset dates can differ; Not announced is shown until a reliable date is available.")
     panel.seasonTooltipHit = seasonHit
     dataFrames[#dataFrames + 1] = seasonHit
 
@@ -1639,7 +1639,11 @@ UpdatePanel = function()
 
     -- Season end (toggleable)
     split.seasonL:SetText("Season Ends")
-    split.seasonV:SetText(col(C.white, KeystoneCutoffsData.seasonEnd or "Unknown"))
+    local regionEnds = KeystoneCutoffsData.seasonEnds
+    local seasonEnd = regionEnds and regionEnds[GetDataRegion()]
+        or KeystoneCutoffsData.seasonEnd
+        or "Unknown"
+    split.seasonV:SetText(col(C.white, seasonEnd))
 
     -- Cutoffs updated (with stale-data warning if > 7 days old)
     split.updatedL:SetText("Cutoffs Updated")

@@ -9,5 +9,6 @@ ignore:
   - update_cutoffs.py
   - api.txt
   - .github
+  - tests
   - walkthrough.md
   - .pkgmeta
