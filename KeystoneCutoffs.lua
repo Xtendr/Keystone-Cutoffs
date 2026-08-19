@@ -40,18 +40,83 @@ local function col(colour, text)
 end
 
 -- ─── Season dungeon list (challenge mode IDs + display info) ─────────────────
--- Order matches the Raider.IO tooltip convention (same short names).
 -- challengeModeID = icon.mapID used by C_MythicPlus.GetSeasonBestForMap().
-local DUNGEON_PACE_DATA = {
-    { mapID = 161,  short = "SR",   name = "Skyreach"               },
-    { mapID = 239,  short = "SEAT", name = "Seat of the Triumvirate" },
-    { mapID = 402,  short = "AA",   name = "Algeth'ar Academy"      },
-    { mapID = 559,  short = "NPX",  name = "Nexus-Point Xenas"      },
-    { mapID = 556,  short = "POS",  name = "Pit of Saron"           },
-    { mapID = 560,  short = "MC",   name = "Maisara Caverns"        },
-    { mapID = 558,  short = "MT",   name = "Magisters' Terrace"     },
-    { mapID = 557,  short = "WS",   name = "Windrunner Spire"       },
+-- Fallback pool is Midnight Season 2 (patch 12.1). refreshSeasonDungeons()
+-- overwrites these in place from C_ChallengeMode.GetMapTable() so the pace
+-- rows follow the live keystone rotation without a code change next season.
+-- Short names match Raider.IO's locale-independent abbreviations.
+local DUNGEON_SHORT_NAMES = {
+    -- Midnight Season 2
+    [588] = "AOF",  -- Altar of Fangs
+    [586] = "DON",  -- Den of Nalorakk
+    [587] = "MR",   -- Murder Row
+    [584] = "BV",   -- The Blinding Vale
+    [585] = "VSA",  -- Voidscar Arena
+    [249] = "KR",   -- Kings' Rest
+    [399] = "RLP",  -- Ruby Life Pools
+    [250] = "TOS",  -- Temple of Sethraliss
+    -- Midnight Season 1 (kept so a delayed client still labels correctly)
+    [161] = "SR",   -- Skyreach
+    [239] = "SEAT", -- Seat of the Triumvirate
+    [402] = "AA",   -- Algeth'ar Academy
+    [559] = "NPX",  -- Nexus-Point Xenas
+    [556] = "POS",  -- Pit of Saron
+    [560] = "MC",   -- Maisara Caverns
+    [558] = "MT",   -- Magisters' Terrace
+    [557] = "WS",   -- Windrunner Spire
 }
+
+local DUNGEON_PACE_DATA = {
+    { mapID = 588, short = "AOF", name = "Altar of Fangs"       },
+    { mapID = 586, short = "DON", name = "Den of Nalorakk"      },
+    { mapID = 587, short = "MR",  name = "Murder Row"           },
+    { mapID = 584, short = "BV",  name = "The Blinding Vale"    },
+    { mapID = 585, short = "VSA", name = "Voidscar Arena"       },
+    { mapID = 249, short = "KR",  name = "Kings' Rest"          },
+    { mapID = 399, short = "RLP", name = "Ruby Life Pools"      },
+    { mapID = 250, short = "TOS", name = "Temple of Sethraliss" },
+}
+
+local function deriveShortName(name)
+    if type(name) ~= "string" or name == "" then return "?" end
+    local parts = {}
+    for word in string.gmatch(name, "%S+") do
+        local lower = string.lower(word)
+        if lower ~= "the" and lower ~= "of" then
+            parts[#parts + 1] = string.upper(string.sub(word, 1, 1))
+        end
+    end
+    if #parts == 0 then
+        return string.upper(string.sub(name, 1, 3))
+    end
+    local short = table.concat(parts)
+    if #short > 4 then short = string.sub(short, 1, 4) end
+    return short
+end
+
+local function refreshSeasonDungeons()
+    if not (C_ChallengeMode and C_ChallengeMode.GetMapTable) then return end
+    local ok, maps = pcall(C_ChallengeMode.GetMapTable)
+    if not ok or type(maps) ~= "table" or #maps == 0 then return end
+
+    for i, mapID in ipairs(maps) do
+        local name
+        if C_ChallengeMode.GetMapUIInfo then
+            local infoOk, mapName = pcall(C_ChallengeMode.GetMapUIInfo, mapID)
+            if infoOk and type(mapName) == "string" and mapName ~= "" then
+                name = mapName
+            end
+        end
+        local entry = DUNGEON_PACE_DATA[i]
+        if not entry then
+            entry = {}
+            DUNGEON_PACE_DATA[i] = entry
+        end
+        entry.mapID = mapID
+        entry.name  = name or entry.name or ("Map " .. tostring(mapID))
+        entry.short = DUNGEON_SHORT_NAMES[mapID] or deriveShortName(entry.name)
+    end
+end
 
 local function fmt(n)
     if type(n) ~= "number" then return "N/A" end
@@ -1063,6 +1128,8 @@ end
 
 -- ─── Panel construction ───────────────────────────────────────────────────────
 local function CreatePanel()
+    refreshSeasonDungeons()
+
     panel = CreateFrame("Frame", "KeystoneCutoffsPanel", ChallengesFrame, "TooltipBackdropTemplate")
     panel:SetParent(ChallengesFrame)
     panel:SetWidth(FRAME_WIDTH)
@@ -1546,6 +1613,7 @@ end
 -- ─── Panel update ─────────────────────────────────────────────────────────────
 UpdatePanel = function()
     if not panel or not panel:IsShown() then return end
+    refreshSeasonDungeons()
     PositionPanel()
 
     local split = panel.split
@@ -1994,6 +2062,7 @@ local function InitializeUI()
         updater:RegisterEvent(ev)
     end
     updater:SetScript("OnEvent", function()
+        refreshSeasonDungeons()
         UpdatePanel()
         UpdateDungeonOverlays()
     end)
@@ -2040,6 +2109,10 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         -- Minimap button is independent of ChallengesUI and can register immediately.
         InitializeMinimapButton()
         UpdateMinimapButton()
+
+        if C_MythicPlus and C_MythicPlus.RequestMapInfo then
+            pcall(C_MythicPlus.RequestMapInfo)
+        end
 
         dataReady = true
         TryInitialize()
