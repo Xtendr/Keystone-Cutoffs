@@ -13,6 +13,10 @@ Keystone Cutoffs brings live Raider.IO Mythic+ rating cutoffs directly into your
 * **Native Rarity Colors:** Dungeon scores are color-coded automatically based on Blizzard's official keystone level rarity (Green for +2, Blue for +3-5, Purple, Orange).
 * **Compact & Draggable:** A clean, draggable main panel that can be collapsed or put into "Compact Mode" to save screen space when you only want to see the essentials.
 * **Customization:** Choose from any SharedMedia font for your dungeon overlays, with live previews. Adjust text sizes, outlines, and shadows for perfect readability.
+* **Optional Goal Mode:** Replace the default cutoff block with one focused percentile, achievement, or custom score goal. Disabled by default.
+* **Optional Progress Insights:** Track movement between bundled cutoff releases, show the dungeon furthest behind title pace, or retain last-known character scores. Every history feature is disabled by default.
+* **Optional Standalone Panel:** Keep the dashboard visible outside Blizzard's Mythic+ window, with independent scale, opacity, and position controls. Disabled by default.
+* **Detailed Ladder View:** Open a deliberate popout for every percentile, achievement threshold, population value, and opted-in character snapshot without adding rows to the normal panel.
 
 ## Usage
 
@@ -21,6 +25,9 @@ Keystone Cutoffs brings live Raider.IO Mythic+ rating cutoffs directly into your
 * Hold **Shift + Left-Click** on the main panel to drag it around your screen.
 * Adjust your dungeon overlay fonts, sizes, and outlines in the "Customize" tab.
 * Toggle "Compact Mode" in the "Display" tab for a minimal UI footprint.
+* Use the "Goals" and "Advanced" tabs only when you want the optional progression tools. Those tabs retain selective `?` help for unfamiliar features; familiar Display and Customize controls stay visually quiet.
+
+All newly added progression, history, and standalone features are opt-in. Existing users keep the lightweight default dashboard unless they explicitly enable them.
 
 ## Installation
 

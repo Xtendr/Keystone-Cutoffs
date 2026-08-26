@@ -5,6 +5,7 @@
 -- License: MIT
 
 local ADDON_NAME = "KeystoneCutoffs"
+local CURRENT_NEWS_ID = "optional-progression-update-2026-08-26"
 
 -- ─── Saved-variable defaults ──────────────────────────────────────────────────
 local DB_DEFAULTS = {
@@ -14,8 +15,20 @@ local DB_DEFAULTS = {
     showDungeonScores = true,
     showDungeonPace   = false,
     compactMode       = false,
+    collapsed         = false,
     position          = "RIGHT",   -- "RIGHT" | "BOTTOM"
-    dataRegion        = "auto",    -- "auto" | "eu" | "us"
+    dataRegion        = "auto",    -- "auto" | "eu" | "us" | "kr" | "tw"
+    dataFaction       = "all",     -- "all" | "horde" | "alliance"
+    standaloneMode    = false,
+    panelScale        = 100,
+    panelOpacity      = 100,
+    -- Optional progression features (all deliberately disabled by default)
+    goalMode          = false,
+    goalTarget        = "title",   -- title | top1 | myth | legend | hero | master | custom
+    goalCustomScore   = 3000,
+    showCutoffMovement= false,
+    showWeakestDungeon= false,
+    trackCharacters   = false,
     -- Customize (dungeon score overlays)
     overlayFont       = "Friz Quadrata TT",
     overlayScoreSize  = 14,
@@ -23,7 +36,11 @@ local DB_DEFAULTS = {
     overlayOutline    = "OUTLINE", -- "NONE" | "OUTLINE" | "THICKOUTLINE" | "SHADOW"
     -- Persistence
     panelPosition     = nil,       -- { point, relPoint, x, y } when user drags panel
+    standalonePosition= nil,       -- UIParent-relative position for standalone mode
     minimap           = { hide = false },
+    cutoffHistory     = {},        -- opt-in, bounded previous data snapshots by region/faction
+    characterSnapshots = {},       -- opt-in account character summaries
+    lastSeenNews      = "",        -- Stable announcement ID; independent of daily data tags
 }
 
 -- ─── Colour palette ──────────────────────────────────────────────────────────
@@ -206,6 +223,113 @@ local PositionPanel
 local UpdatePanel
 local UpdateDungeonOverlays
 local getDungeonBenchmark
+local ApplyPanelPresentation
+local ShowAdvancedDetails
+local GetDataRegion
+
+local GOAL_OPTIONS = {
+    { value = "title",  label = "Top 0.1% title" },
+    { value = "top1",   label = "Top 1%" },
+    { value = "myth",   label = "Keystone Myth" },
+    { value = "legend", label = "Keystone Legend" },
+    { value = "hero",   label = "Keystone Hero" },
+    { value = "master", label = "Keystone Master" },
+    { value = "custom", label = "Custom score" },
+}
+
+local function getDataFaction()
+    local faction = (KeystoneCutoffsDB and KeystoneCutoffsDB.dataFaction) or "all"
+    if faction ~= "horde" and faction ~= "alliance" then return "all" end
+    return faction
+end
+
+local function getPercentileEntry(pct, key)
+    local group = pct and pct[key]
+    if type(group) ~= "table" then return nil end
+    return group[getDataFaction()] or group.all
+end
+
+local function getGoalTarget(regionData)
+    local db = KeystoneCutoffsDB or {}
+    local key = db.goalTarget or "title"
+    local pct = regionData and regionData.percentiles or {}
+    local titles = regionData and regionData.titles or {}
+
+    if key == "title" then
+        local entry = getPercentileEntry(pct, "p999")
+        return "Top 0.1%", entry and entry.score
+    elseif key == "top1" then
+        local entry = getPercentileEntry(pct, "p990")
+        return "Top 1%", entry and entry.score
+    elseif key == "custom" then
+        return "Custom", tonumber(db.goalCustomScore)
+    end
+
+    local titleKeys = {
+        myth = { "Keystone Myth", "keystoneMyth" },
+        legend = { "Keystone Legend", "keystoneLegend" },
+        hero = { "Keystone Hero", "keystoneHero" },
+        master = { "Keystone Master", "keystoneMaster" },
+    }
+    local info = titleKeys[key]
+    local entry = info and titles[info[2]]
+    return info and info[1] or "Goal", entry and entry.fixedScore
+end
+
+local function formatGoalDifference(target, current)
+    if type(target) ~= "number" or type(current) ~= "number" then
+        return col(C.grey, "—")
+    end
+    local delta = target - current
+    if math.abs(delta) < 0.05 then return col(C.gold, "At goal") end
+    if delta > 0 then return col(scoreColorFor(target), "Need " .. fmt(delta)) end
+    return "|cFF44FF44Ahead " .. fmt(-delta) .. "|r"
+end
+
+local function recordOptionalSnapshots(region, regionData, myScore)
+    local db = KeystoneCutoffsDB or {}
+    local faction = getDataFaction()
+
+    if db.showCutoffMovement then
+        db.cutoffHistory = type(db.cutoffHistory) == "table" and db.cutoffHistory or {}
+        local historyKey = region .. ":" .. faction
+        local history = type(db.cutoffHistory[historyKey]) == "table" and db.cutoffHistory[historyKey] or {}
+        db.cutoffHistory[historyKey] = history
+        local entry = getPercentileEntry(regionData and regionData.percentiles, "p999")
+        local snapshotID = regionData and regionData.updatedAt
+        if entry and entry.score and snapshotID and (#history == 0 or history[#history].id ~= snapshotID) then
+            history[#history + 1] = { id = snapshotID, score = entry.score }
+            while #history > 8 do table.remove(history, 1) end
+        end
+    end
+
+    if db.trackCharacters then
+        db.characterSnapshots = type(db.characterSnapshots) == "table" and db.characterSnapshots or {}
+        local name, realm = UnitName("player")
+        realm = realm or GetRealmName() or ""
+        if name then
+            local _, classToken = UnitClass("player")
+            local key = name .. "-" .. realm
+            db.characterSnapshots[key] = {
+                name = name,
+                realm = realm,
+                class = classToken,
+                score = tonumber(myScore) or 0,
+                region = region,
+                updatedAt = regionData and regionData.updatedAt or "Unknown",
+            }
+        end
+    end
+end
+
+local function getCutoffMovement(region)
+    local db = KeystoneCutoffsDB or {}
+    local history = db.cutoffHistory and db.cutoffHistory[region .. ":" .. getDataFaction()]
+    if type(history) ~= "table" or #history < 2 then return nil end
+    local previous, current = history[#history - 1], history[#history]
+    if type(previous.score) ~= "number" or type(current.score) ~= "number" then return nil end
+    return current.score - previous.score
+end
 
 -- ─── Custom Settings Window ──────────────────────────────────────────────────
 -- Styling tokens (dark theme with gold accent)
@@ -232,14 +356,539 @@ local function mixBD(f)
     if not f.SetBackdrop then Mixin(f, BackdropTemplateMixin) end
 end
 
+local function addHelpButton(parent, anchor, titleText, bodyText)
+    if not bodyText or bodyText == "" then return nil end
+    local help = CreateFrame("Button", nil, parent)
+    help:SetSize(16, 16)
+    help:SetPoint(unpack(anchor))
+
+    local text = help:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    text:SetPoint("CENTER", 0, 0)
+    text:SetText("?")
+    text:SetTextColor(ST.muted[1], ST.muted[2], ST.muted[3])
+
+    help:SetScript("OnEnter", function(self)
+        text:SetTextColor(ST.accent[1], ST.accent[2], ST.accent[3])
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(titleText or "Keystone Cutoffs", 1, 0.82, 0)
+        GameTooltip:AddLine(bodyText, 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    help:SetScript("OnLeave", function()
+        text:SetTextColor(ST.muted[1], ST.muted[2], ST.muted[3])
+        GameTooltip:Hide()
+    end)
+    return help
+end
+
 local settingsWin
 local settingsRefreshFns = {}
+local whatsNewWin
+local advancedDetailsWin
+
+local function IsAddonLoaded(name)
+    if C_AddOns and C_AddOns.IsAddOnLoaded then
+        return C_AddOns.IsAddOnLoaded(name)
+    end
+    if IsAddOnLoaded then
+        return IsAddOnLoaded(name)
+    end
+    return false
+end
+
+local function MarkCurrentNewsSeen()
+    if KeystoneCutoffsDB then
+        KeystoneCutoffsDB.lastSeenNews = CURRENT_NEWS_ID
+    end
+end
+
+local function CreateWhatsNewWindow()
+    if whatsNewWin then return end
+
+    local WIN_W = 520
+    local win = CreateFrame("Frame", "KCWhatsNewFrame", UIParent, "BackdropTemplate")
+    win:SetWidth(WIN_W)
+    win:SetFrameStrata("DIALOG")
+    win:SetToplevel(true)
+    win:SetMovable(true)
+    win:EnableMouse(true)
+    win:SetClampedToScreen(true)
+    win:SetPoint("CENTER", UIParent, "CENTER", 0, 60)
+    mixBD(win)
+    win:SetBackdrop(BD_EDGE)
+    win:SetBackdropColor(ST.bg[1], ST.bg[2], ST.bg[3], ST.bg[4])
+    win:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 1)
+    win:Hide()
+    tinsert(UISpecialFrames, "KCWhatsNewFrame")
+
+    local TITLE_H = 32
+    local titleBar = CreateFrame("Frame", nil, win)
+    titleBar:SetHeight(TITLE_H)
+    titleBar:SetPoint("TOPLEFT", win, "TOPLEFT", 0, 0)
+    titleBar:SetPoint("TOPRIGHT", win, "TOPRIGHT", 0, 0)
+    titleBar:SetFrameLevel(win:GetFrameLevel() + 3)
+    titleBar:EnableMouse(true)
+    titleBar:RegisterForDrag("LeftButton")
+    titleBar:SetScript("OnDragStart", function() win:StartMoving() end)
+    titleBar:SetScript("OnDragStop", function() win:StopMovingOrSizing() end)
+
+    local titleBg = titleBar:CreateTexture(nil, "BACKGROUND")
+    titleBg:SetAllPoints()
+    titleBg:SetColorTexture(ST.surface[1], ST.surface[2], ST.surface[3], 1)
+
+    local title = titleBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("LEFT", 12, 0)
+    title:SetText(col(C.gold, "What's New in Keystone Cutoffs"))
+    title:SetWordWrap(false)
+
+    local closeBtn = CreateFrame("Button", nil, win, "BackdropTemplate")
+    closeBtn:SetSize(22, 22)
+    closeBtn:SetPoint("TOPRIGHT", -5, -5)
+    closeBtn:SetFrameLevel(win:GetFrameLevel() + 10)
+    mixBD(closeBtn)
+    closeBtn:SetBackdrop(BD_EDGE)
+    closeBtn:SetBackdropColor(ST.element[1], ST.element[2], ST.element[3], 1)
+    closeBtn:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.4)
+
+    local closeX = closeBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    closeX:SetPoint("CENTER", 0, -1)
+    closeX:SetText("×")
+    closeX:SetTextColor(ST.muted[1], ST.muted[2], ST.muted[3])
+
+    closeBtn:SetScript("OnEnter", function()
+        closeBtn:SetBackdropBorderColor(ST.red[1], ST.red[2], ST.red[3], 1)
+        closeX:SetTextColor(ST.red[1], ST.red[2], ST.red[3])
+    end)
+    closeBtn:SetScript("OnLeave", function()
+        closeBtn:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.4)
+        closeX:SetTextColor(ST.muted[1], ST.muted[2], ST.muted[3])
+    end)
+    closeBtn:SetScript("OnClick", function() win:Hide() end)
+
+    local titleSep = win:CreateTexture(nil, "BACKGROUND")
+    titleSep:SetHeight(1)
+    titleSep:SetPoint("TOPLEFT", win, "TOPLEFT", 0, -TITLE_H)
+    titleSep:SetPoint("TOPRIGHT", win, "TOPRIGHT", 0, -TITLE_H)
+    titleSep:SetColorTexture(ST.border[1], ST.border[2], ST.border[3], 1)
+
+    local versionBand = CreateFrame("Frame", nil, win)
+    versionBand:SetHeight(34)
+    versionBand:SetPoint("TOPLEFT", win, "TOPLEFT", 16, -46)
+    versionBand:SetPoint("TOPRIGHT", win, "TOPRIGHT", -16, -46)
+
+    local versionFill = versionBand:CreateTexture(nil, "BACKGROUND")
+    versionFill:SetAllPoints()
+    versionFill:SetColorTexture(ST.accent[1], ST.accent[2], ST.accent[3], 0.12)
+
+    local versionLine = versionBand:CreateTexture(nil, "ARTWORK")
+    versionLine:SetHeight(2)
+    versionLine:SetPoint("BOTTOMLEFT")
+    versionLine:SetPoint("BOTTOMRIGHT")
+    versionLine:SetColorTexture(ST.accent[1], ST.accent[2], ST.accent[3], 0.9)
+
+    local versionText = versionBand:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    versionText:SetPoint("LEFT", 12, 1)
+    versionText:SetText(col(C.white, "v1.3.0"))
+
+    local intro = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    intro:SetPoint("TOPLEFT", win, "TOPLEFT", 18, -94)
+    intro:SetPoint("TOPRIGHT", win, "TOPRIGHT", -18, -94)
+    intro:SetJustifyH("LEFT")
+    intro:SetWordWrap(true)
+    intro:SetText("All new progression and history features are optional and disabled by default.")
+    intro:SetTextColor(ST.muted[1], ST.muted[2], ST.muted[3])
+
+    local function CreateNewsSection(text, yOffset)
+        local heading = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        heading:SetPoint("TOPLEFT", win, "TOPLEFT", 16, yOffset)
+        heading:SetText(col(C.gold, string.upper(text)))
+
+        local line = win:CreateTexture(nil, "ARTWORK")
+        line:SetHeight(1)
+        line:SetPoint("TOPLEFT", win, "TOPLEFT", 16, yOffset - 21)
+        line:SetPoint("TOPRIGHT", win, "TOPRIGHT", -16, yOffset - 21)
+        line:SetColorTexture(ST.border[1], ST.border[2], ST.border[3], 0.75)
+        return heading, line
+    end
+
+    local function CreateNewsRow(category, body, yOffset)
+        local dot = win:CreateTexture(nil, "ARTWORK")
+        dot:SetSize(4, 4)
+        dot:SetPoint("TOPLEFT", win, "TOPLEFT", 22, yOffset - 7)
+        dot:SetColorTexture(ST.accent[1], ST.accent[2], ST.accent[3], 0.8)
+
+        local categoryText = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        categoryText:SetPoint("TOPLEFT", win, "TOPLEFT", 34, yOffset)
+        categoryText:SetPoint("TOPRIGHT", win, "TOPRIGHT", -18, yOffset)
+        categoryText:SetJustifyH("LEFT")
+        categoryText:SetText(col(C.gold, string.upper(category)))
+
+        local bodyText = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        bodyText:SetPoint("TOPLEFT", win, "TOPLEFT", 34, yOffset - 17)
+        bodyText:SetPoint("TOPRIGHT", win, "TOPRIGHT", -18, yOffset - 17)
+        bodyText:SetJustifyH("LEFT")
+        bodyText:SetJustifyV("TOP")
+        bodyText:SetWordWrap(true)
+        bodyText:SetSpacing(2)
+        bodyText:SetText(body)
+        bodyText:SetTextColor(ST.muted[1], ST.muted[2], ST.muted[3])
+        return dot, categoryText, bodyText
+    end
+
+    CreateNewsSection("New & Improved", -126)
+    CreateNewsRow(
+        "Goals & Progress",
+        "Choose a focused percentile, achievement, or custom rating goal.",
+        -160
+    )
+    CreateNewsRow(
+        "Goal Status",
+        "See whether your current score is Need, Ahead, or At Goal.",
+        -205
+    )
+    CreateNewsRow(
+        "Optional Insights",
+        "Track cutoff movement, your weakest dungeon, and character scores.",
+        -250
+    )
+    CreateNewsRow(
+        "Detailed Ladder View",
+        "Compare percentile cutoffs, achievements, populations, characters, and regions.",
+        -295
+    )
+    CreateNewsRow(
+        "Display & Settings",
+        "Use standalone positioning, scale, opacity, persistent appearance, and focused help.",
+        -340
+    )
+
+    local companionHeading, companionLine = CreateNewsSection("Optional Integration", -390)
+    local companionDot, companionCategory, companionBody = CreateNewsRow(
+        "Keystone Meta",
+        "Supports companion placement when both addons are enabled.",
+        -424
+    )
+
+    local footerSep = win:CreateTexture(nil, "BACKGROUND")
+    footerSep:SetHeight(1)
+    footerSep:SetPoint("BOTTOMLEFT", win, "BOTTOMLEFT", 16, 48)
+    footerSep:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", -16, 48)
+    footerSep:SetColorTexture(ST.border[1], ST.border[2], ST.border[3], 0.7)
+
+    local feedbackBody = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    feedbackBody:SetPoint("BOTTOMLEFT", win, "BOTTOMLEFT", 16, 17)
+    feedbackBody:SetText(col(C.gold, "Found a bug?") .. " Please leave a comment on our CurseForge page.")
+
+    local gotIt = CreateFrame("Button", nil, win, "BackdropTemplate")
+    gotIt:SetSize(90, 24)
+    gotIt:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", -12, 12)
+    mixBD(gotIt)
+    gotIt:SetBackdrop(BD_EDGE)
+    gotIt:SetBackdropColor(ST.element[1], ST.element[2], ST.element[3], 1)
+    gotIt:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.6)
+
+    local gotItText = gotIt:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    gotItText:SetPoint("CENTER")
+    gotItText:SetText("Got it")
+    gotItText:SetTextColor(ST.text[1], ST.text[2], ST.text[3])
+
+    gotIt:SetScript("OnEnter", function()
+        gotIt:SetBackdropBorderColor(ST.accent[1], ST.accent[2], ST.accent[3], 0.9)
+        gotItText:SetTextColor(ST.accent[1], ST.accent[2], ST.accent[3])
+    end)
+    gotIt:SetScript("OnLeave", function()
+        gotIt:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.6)
+        gotItText:SetTextColor(ST.text[1], ST.text[2], ST.text[3])
+    end)
+    gotIt:SetScript("OnClick", function()
+        win:Hide()
+        pcall(PlaySound, SOUNDKIT and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON or 856)
+    end)
+
+    local function refreshContent()
+        local showCompanion = IsAddonLoaded("KeystoneMeta")
+        companionHeading:SetShown(showCompanion)
+        companionLine:SetShown(showCompanion)
+        companionDot:SetShown(showCompanion)
+        companionCategory:SetShown(showCompanion)
+        companionBody:SetShown(showCompanion)
+        win:SetHeight(showCompanion and 510 or 430)
+    end
+
+    win:SetScript("OnShow", function(self)
+        refreshContent()
+        self._kcNewsWasShown = true
+    end)
+    win:SetScript("OnHide", function(self)
+        if self._kcNewsWasShown then
+            self._kcNewsWasShown = false
+            MarkCurrentNewsSeen()
+        end
+    end)
+
+    win.refreshContent = refreshContent
+    whatsNewWin = win
+end
+
+local function ShowWhatsNewWindow()
+    if not whatsNewWin then CreateWhatsNewWindow() end
+    if whatsNewWin.refreshContent then whatsNewWin.refreshContent() end
+    whatsNewWin:Show()
+    whatsNewWin:Raise()
+end
+
+local function MaybeShowCurrentNews()
+    if not KeystoneCutoffsDB then return end
+    if KeystoneCutoffsDB.lastSeenNews == CURRENT_NEWS_ID then return end
+    if whatsNewWin and whatsNewWin:IsShown() then return end
+    ShowWhatsNewWindow()
+end
+
+local function CreateAdvancedDetailsWindow()
+    if advancedDetailsWin then return end
+
+    local win = CreateFrame("Frame", "KCAdvancedDetailsFrame", UIParent, "BackdropTemplate")
+    win:SetSize(430, 470)
+    win:SetPoint("CENTER", UIParent, "CENTER", 220, 20)
+    win:SetFrameStrata("DIALOG")
+    win:SetToplevel(true)
+    win:SetMovable(true)
+    win:EnableMouse(true)
+    win:SetClampedToScreen(true)
+    mixBD(win)
+    win:SetBackdrop(BD_EDGE)
+    win:SetBackdropColor(ST.bg[1], ST.bg[2], ST.bg[3], ST.bg[4])
+    win:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 1)
+    win:Hide()
+    tinsert(UISpecialFrames, "KCAdvancedDetailsFrame")
+
+    local titleBar = CreateFrame("Frame", nil, win)
+    titleBar:SetPoint("TOPLEFT")
+    titleBar:SetPoint("TOPRIGHT")
+    titleBar:SetHeight(32)
+    titleBar:SetFrameLevel(win:GetFrameLevel() + 3)
+    titleBar:EnableMouse(true)
+    titleBar:RegisterForDrag("LeftButton")
+    titleBar:SetScript("OnDragStart", function() win:StartMoving() end)
+    titleBar:SetScript("OnDragStop", function() win:StopMovingOrSizing() end)
+    local titleBg = titleBar:CreateTexture(nil, "BACKGROUND")
+    titleBg:SetAllPoints()
+    titleBg:SetColorTexture(ST.surface[1], ST.surface[2], ST.surface[3], 1)
+    local title = titleBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("LEFT", 12, 0)
+    title:SetText(col(C.gold, "Keystone Cutoffs") .. " |cFF777777— Details|r")
+
+    local close = CreateFrame("Button", nil, win, "BackdropTemplate")
+    close:SetSize(22, 22)
+    close:SetPoint("TOPRIGHT", -5, -5)
+    close:SetFrameLevel(win:GetFrameLevel() + 10)
+    mixBD(close)
+    close:SetBackdrop(BD_EDGE)
+    close:SetBackdropColor(ST.element[1], ST.element[2], ST.element[3], 1)
+    close:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.5)
+    local closeText = close:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    closeText:SetPoint("CENTER", 0, -1)
+    closeText:SetText("×")
+    close:SetScript("OnClick", function() win:Hide() end)
+
+    local scroll = CreateFrame("ScrollFrame", nil, win, "UIPanelScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", 14, -46)
+    scroll:SetPoint("BOTTOMRIGHT", -32, 14)
+    local scrollBar = scroll.ScrollBar
+    if scrollBar then
+        if scrollBar.ThumbTexture then
+            scrollBar.ThumbTexture:SetColorTexture(ST.border[1], ST.border[2], ST.border[3], 0.8)
+            scrollBar.ThumbTexture:SetWidth(6)
+        end
+        if scrollBar.ScrollUpButton then
+            scrollBar.ScrollUpButton:SetAlpha(0)
+            scrollBar.ScrollUpButton:SetSize(1, 1)
+        end
+        if scrollBar.ScrollDownButton then
+            scrollBar.ScrollDownButton:SetAlpha(0)
+            scrollBar.ScrollDownButton:SetSize(1, 1)
+        end
+    end
+    local content = CreateFrame("Frame", nil, scroll)
+    content:SetSize(370, 1)
+    scroll:SetScrollChild(content)
+    local rowPool = {}
+
+    local function acquireRow(index)
+        local row = rowPool[index]
+        if row then row:Show(); return row end
+        row = CreateFrame("Frame", nil, content)
+        row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.label:SetPoint("LEFT", 0, 0)
+        row.label:SetJustifyH("LEFT")
+        row.label:SetWordWrap(false)
+        row.value = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.value:SetPoint("RIGHT", 0, 0)
+        row.value:SetJustifyH("RIGHT")
+        row.value:SetWordWrap(false)
+        row.label:SetPoint("RIGHT", row.value, "LEFT", -12, 0)
+        row.rule = row:CreateTexture(nil, "BACKGROUND")
+        row.rule:SetHeight(1)
+        row.rule:SetPoint("BOTTOMLEFT")
+        row.rule:SetPoint("BOTTOMRIGHT")
+        row.rule:SetColorTexture(ST.border[1], ST.border[2], ST.border[3], 0.45)
+        rowPool[index] = row
+        return row
+    end
+
+    local function refresh()
+        for _, row in ipairs(rowPool) do row:Hide() end
+        local rowIndex, y = 0, 0
+
+        local function nextRow(height)
+            rowIndex = rowIndex + 1
+            local row = acquireRow(rowIndex)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, y)
+            row:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, y)
+            row:SetHeight(height)
+            row.label:ClearAllPoints()
+            row.value:ClearAllPoints()
+            row.label:SetPoint("LEFT", 0, 0)
+            row.value:SetPoint("RIGHT", 0, 0)
+            row.label:SetPoint("RIGHT", row.value, "LEFT", -12, 0)
+            row.label:SetWordWrap(false)
+            row.value:SetWordWrap(false)
+            row.rule:Hide()
+            y = y - height
+            return row
+        end
+
+        local function addSection(text)
+            if rowIndex > 0 then y = y - 9 end
+            local row = nextRow(23)
+            row.label:SetFontObject(GameFontNormal)
+            row.label:SetText(text)
+            row.label:SetTextColor(ST.accent[1], ST.accent[2], ST.accent[3])
+            row.value:SetText("")
+            row.rule:Show()
+        end
+
+        local function addRow(labelText, valueText, valueMuted)
+            local row = nextRow(18)
+            row.label:SetFontObject(GameFontHighlightSmall)
+            row.value:SetFontObject(GameFontHighlightSmall)
+            row.label:SetText(labelText)
+            row.value:SetText(valueText or "—")
+            row.label:SetTextColor(0.70, 0.70, 0.70, 1)
+            if valueMuted then
+                row.value:SetTextColor(ST.muted[1], ST.muted[2], ST.muted[3], 1)
+            else
+                row.value:SetTextColor(ST.text[1], ST.text[2], ST.text[3], 1)
+            end
+        end
+
+        local function addParagraph(text)
+            local row = nextRow(20)
+            row.value:SetText("")
+            row.label:ClearAllPoints()
+            row.label:SetPoint("TOPLEFT", 0, -2)
+            row.label:SetPoint("TOPRIGHT", 0, -2)
+            row.label:SetFontObject(GameFontDisableSmall)
+            row.label:SetJustifyH("LEFT")
+            row.label:SetWordWrap(true)
+            row.label:SetText(text)
+            row.label:SetTextColor(ST.muted[1], ST.muted[2], ST.muted[3], 1)
+            local height = math.max(20, row.label:GetStringHeight() + 6)
+            row:SetHeight(height)
+            y = y - (height - 20)
+        end
+
+        local function populationText(value)
+            if type(value) == "number" and BreakUpLargeNumbers then
+                return BreakUpLargeNumbers(value)
+            end
+            return tostring(value or "—")
+        end
+
+        local region = GetDataRegion and GetDataRegion() or "eu"
+        local regionData = KeystoneCutoffsData and KeystoneCutoffsData.regions
+            and KeystoneCutoffsData.regions[region]
+        local faction = getDataFaction()
+        local factionLabel = faction == "all" and "All players"
+            or (faction == "horde" and "Horde" or "Alliance")
+
+        addSection("Overview")
+        addRow("Region", string.upper(region))
+        addRow("Ladder", factionLabel)
+        if not regionData then
+            addParagraph("No cutoff data is available for this selection.")
+        else
+            local score = C_ChallengeMode and C_ChallengeMode.GetOverallDungeonScore
+                and C_ChallengeMode.GetOverallDungeonScore() or 0
+            addRow("Current character score", fmt(score))
+            addRow("Data updated", regionData.updatedAt or "Unknown", true)
+
+            addSection("Percentile cutoffs")
+            for _, item in ipairs({
+                { "Top 0.1%", "p999" }, { "Top 1%", "p990" },
+                { "Top 10%", "p900" }, { "Top 25%", "p750" }, { "Top 40%", "p600" },
+            }) do
+                local entry = getPercentileEntry(regionData.percentiles, item[2])
+                if entry and entry.score then
+                    addRow(item[1], fmt(entry.score) .. "  ·  "
+                        .. populationText(entry.population) .. " players")
+                end
+            end
+
+            addSection("Achievement goals")
+            for _, item in ipairs({
+                { "Keystone Myth", "keystoneMyth" }, { "Keystone Legend", "keystoneLegend" },
+                { "Keystone Hero", "keystoneHero" }, { "Keystone Master", "keystoneMaster" },
+                { "Keystone Conqueror", "keystoneConqueror" }, { "Keystone Explorer", "keystoneExplorer" },
+            }) do
+                local entry = regionData.titles and regionData.titles[item[2]]
+                if entry and entry.fixedScore then
+                    addRow(item[1], fmt(entry.fixedScore))
+                end
+            end
+        end
+
+        local snapshots = KeystoneCutoffsDB and KeystoneCutoffsDB.characterSnapshots
+        local characters = {}
+        if type(snapshots) == "table" then
+            for _, snapshot in pairs(snapshots) do characters[#characters + 1] = snapshot end
+            table.sort(characters, function(a, b) return (a.score or 0) > (b.score or 0) end)
+        end
+        addSection("Tracked characters")
+        if #characters == 0 then
+            addParagraph("Character tracking is off or no characters have been recorded yet.")
+        else
+            for i = 1, math.min(#characters, 12) do
+                local char = characters[i]
+                local charName = (char.name or "?")
+                    .. (char.realm and char.realm ~= "" and ("-" .. char.realm) or "")
+                addRow(charName, fmt(char.score or 0) .. "  ·  " .. string.upper(char.region or "?"))
+            end
+            if #characters > 12 then addParagraph(string.format("...and %d more", #characters - 12)) end
+        end
+
+        y = y - 10
+        addParagraph("Cutoff movement compares bundled data releases seen while the option is enabled. Character scores are last-known snapshots, not live cross-character data.")
+        content:SetHeight(math.max(1, -y + 8))
+    end
+
+    win.refresh = refresh
+    advancedDetailsWin = win
+end
+
+ShowAdvancedDetails = function()
+    if not advancedDetailsWin then CreateAdvancedDetailsWindow() end
+    if advancedDetailsWin.refresh then advancedDetailsWin.refresh() end
+    advancedDetailsWin:Show()
+    advancedDetailsWin:Raise()
+end
 
 -- Build and return a checkbox row Frame.
 -- dbKey  = KeystoneCutoffsDB key (boolean)
 -- label  = display text
 -- onToggle = optional extra callback
-local function makeKCCheckbox(parent, yOff, dbKey, labelText, onToggle)
+local function makeKCCheckbox(parent, yOff, dbKey, labelText, onToggle, helpText)
     local ROW_H_CB = 22
 
     local row = CreateFrame("Button", nil, parent)
@@ -268,6 +917,7 @@ local function makeKCCheckbox(parent, yOff, dbKey, labelText, onToggle)
     lbl:SetText(labelText)
     lbl:SetTextColor(ST.text[1], ST.text[2], ST.text[3])
     lbl:SetWordWrap(false)
+    addHelpButton(row, { "RIGHT", row, "RIGHT", 0, 0 }, labelText, helpText)
 
     local function refresh()
         check:SetShown(KeystoneCutoffsDB and KeystoneCutoffsDB[dbKey] ~= false)
@@ -296,7 +946,7 @@ end
 
 -- Build a label + right-side dropdown button.
 -- Returns: labelFs, dropBtn, consumed_height
-local function makeKCDropdown(parent, yOff, dbKey, labelText, opts, extraCb)
+local function makeKCDropdown(parent, yOff, dbKey, labelText, opts, extraCb, helpText)
     local ITEM_H  = 24
     local BTN_W_D = 140
     local ROW_H_D = 24
@@ -316,6 +966,7 @@ local function makeKCDropdown(parent, yOff, dbKey, labelText, opts, extraCb)
     ddBtn:SetBackdrop(BD_EDGE)
     ddBtn:SetBackdropColor(ST.element[1], ST.element[2], ST.element[3], 1)
     ddBtn:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.6)
+    addHelpButton(parent, { "RIGHT", ddBtn, "LEFT", -6, 0 }, labelText, helpText)
 
     local ddLabel = ddBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     ddLabel:SetPoint("LEFT", 8, 0)
@@ -417,13 +1068,13 @@ end
 --   [label] ──────●────────── [value]
 -- Uses a custom backdropped track + a flat rectangular thumb instead of the
 -- default Blizzard slider textures which clash with the dark theme.
-local function makeKCSlider(parent, yOff, dbKey, labelText, minVal, maxVal, step, extraCb)
+local function makeKCSlider(parent, yOff, dbKey, labelText, minVal, maxVal, step, extraCb, helpText)
     local ROW_H_S   = 24
     local TRACK_H   = 10
     local THUMB_W   = 10
     local THUMB_H   = 16
     local LABEL_W   = 78
-    local VALUE_W   = 28
+    local VALUE_W   = 46
     local GAP       = 10
 
     local row = CreateFrame("Frame", nil, parent)
@@ -438,6 +1089,7 @@ local function makeKCSlider(parent, yOff, dbKey, labelText, minVal, maxVal, step
     lbl:SetText(labelText)
     lbl:SetTextColor(ST.text[1], ST.text[2], ST.text[3])
     lbl:SetWordWrap(false)
+    addHelpButton(row, { "LEFT", row, "LEFT", LABEL_W - 12, 0 }, labelText, helpText)
 
     local valueFs = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     valueFs:SetPoint("RIGHT", 0, 0)
@@ -504,7 +1156,7 @@ local function makeKCSlider(parent, yOff, dbKey, labelText, minVal, maxVal, step
 end
 
 -- Flat button row (used for "Reset Panel Position").
-local function makeKCButton(parent, yOff, labelText, onClick)
+local function makeKCButton(parent, yOff, labelText, onClick, helpText)
     local ROW_H_B = 24
     local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
     btn:SetSize(parent:GetWidth() - 28, ROW_H_B)
@@ -518,6 +1170,7 @@ local function makeKCButton(parent, yOff, labelText, onClick)
     lbl:SetPoint("CENTER")
     lbl:SetText(labelText)
     lbl:SetTextColor(ST.text[1], ST.text[2], ST.text[3])
+    addHelpButton(btn, { "RIGHT", btn, "RIGHT", -6, 0 }, labelText, helpText)
 
     btn:SetScript("OnEnter", function()
         btn:SetBackdropBorderColor(ST.accent[1], ST.accent[2], ST.accent[3], 0.9)
@@ -533,7 +1186,7 @@ local function makeKCButton(parent, yOff, labelText, onClick)
 end
 
 -- Searchable LibSharedMedia font picker with font-previewed items.
-local function makeKCFontDropdown(parent, yOff, dbKey, labelText, extraCb)
+local function makeKCFontDropdown(parent, yOff, dbKey, labelText, extraCb, helpText)
     local ITEM_H   = 22
     local BTN_W_D  = 170
     local ROW_H_D  = 24
@@ -555,6 +1208,7 @@ local function makeKCFontDropdown(parent, yOff, dbKey, labelText, extraCb)
     ddBtn:SetBackdrop(BD_EDGE)
     ddBtn:SetBackdropColor(ST.element[1], ST.element[2], ST.element[3], 1)
     ddBtn:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.6)
+    addHelpButton(parent, { "RIGHT", ddBtn, "LEFT", -6, 0 }, labelText, helpText)
 
     -- Template ensures the FontString has a baseline font; otherwise the
     -- first SetText() call errors with "Font not set" (SetFont happens after).
@@ -754,7 +1408,7 @@ end
 
 -- Custom checkbox for nested DB values (used by the minimap toggle).
 -- getFn returns bool "checked"; setFn(newBool) persists.
-local function makeKCCheckboxCustom(parent, yOff, labelText, getFn, setFn, onToggle)
+local function makeKCCheckboxCustom(parent, yOff, labelText, getFn, setFn, onToggle, helpText)
     local ROW_H_CB = 22
 
     local row = CreateFrame("Button", nil, parent)
@@ -780,6 +1434,7 @@ local function makeKCCheckboxCustom(parent, yOff, labelText, getFn, setFn, onTog
     lbl:SetText(labelText)
     lbl:SetTextColor(ST.text[1], ST.text[2], ST.text[3])
     lbl:SetWordWrap(false)
+    addHelpButton(row, { "RIGHT", row, "RIGHT", 0, 0 }, labelText, helpText)
 
     local function refresh() check:SetShown(getFn() and true or false) end
 
@@ -807,7 +1462,7 @@ local UpdateMinimapButton
 local function CreateSettingsWindow()
     if settingsWin then return end
 
-    local WIN_W = 340
+    local WIN_W = 420
 
     local win = CreateFrame("Frame", "KCSettingsFrame", UIParent, "BackdropTemplate")
     win:SetWidth(WIN_W)
@@ -898,7 +1553,7 @@ local function CreateSettingsWindow()
 
     local function makeTabButton(name, labelText, xOff)
         local b = CreateFrame("Button", nil, win)
-        b:SetSize(92, TAB_BAR_H)
+        b:SetSize(96, TAB_BAR_H)
         b:SetPoint("TOPLEFT", win, "TOPLEFT", xOff, tabBarY)
         b.label = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         b.label:SetPoint("CENTER", 0, 2)
@@ -928,8 +1583,10 @@ local function CreateSettingsWindow()
         return b
     end
 
-    makeTabButton("display",   "Display",   14)
-    makeTabButton("customize", "Customize", 112)
+    makeTabButton("display",   "Display",    10)
+    makeTabButton("goals",     "Goals",     111)
+    makeTabButton("customize", "Customize", 212)
+    makeTabButton("advanced",  "Advanced",  313)
 
     -- Separator under tab bar
     local tabSep = win:CreateTexture(nil, "BACKGROUND")
@@ -951,7 +1608,9 @@ local function CreateSettingsWindow()
     end
 
     local display   = makeTabFrame("display")
+    local goals     = makeTabFrame("goals")
     local customize = makeTabFrame("customize")
+    local advanced  = makeTabFrame("advanced")
 
     local function sectionLabel(parent, text, yOff)
         local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -969,17 +1628,33 @@ local function CreateSettingsWindow()
         d:SetColorTexture(ST.border[1], ST.border[2], ST.border[3], 0.5)
     end
 
+    local function introText(parent, text, yOff)
+        local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        fs:SetPoint("TOPLEFT", parent, "TOPLEFT", 14, yOff)
+        fs:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -14, yOff)
+        fs:SetJustifyH("LEFT")
+        fs:SetWordWrap(true)
+        fs:SetText(text)
+        return 28
+    end
+
     -- ── Display tab ───────────────────────────────────────────────────────────
     local dy = -10
-    sectionLabel(display, "DISPLAY", dy); dy = dy - 18
+    dy = dy - introText(display,
+        "Keep the familiar dashboard, then enable only the sections you want.", dy) - 6
+    sectionLabel(display, "PANEL CONTENT", dy); dy = dy - 18
 
-    local _, hD1 = makeKCCheckbox(display, dy, "showMythThreshold", "Show Mythic Threshold"); dy = dy - hD1 - 6
-    local _, hD2 = makeKCCheckbox(display, dy, "showSeasonEnd",     "Show Estimated Season End"); dy = dy - hD2 - 6
+    local _, hD1 = makeKCCheckbox(display, dy, "showMythThreshold", "Show Mythic Threshold")
+    dy = dy - hD1 - 6
+    local _, hD2 = makeKCCheckbox(display, dy, "showSeasonEnd", "Show Season End")
+    dy = dy - hD2 - 6
     local _, hD3 = makeKCCheckbox(display, dy, "showDungeonScores", "Show Dungeon Score Overlays",
-        function() UpdateDungeonOverlays() end); dy = dy - hD3 - 6
-    local _, hD4 = makeKCCheckbox(display, dy, "showDungeonPace",   "Show Dungeon Pace",
-        function() UpdatePanel() end); dy = dy - hD4 - 6
-    local _, hD5cb = makeKCCheckbox(display, dy, "compactMode",     "Compact Mode"); dy = dy - hD5cb - 6
+        function() UpdateDungeonOverlays() end)
+    dy = dy - hD3 - 6
+    local _, hD4 = makeKCCheckbox(display, dy, "showDungeonPace", "Show Dungeon Pace")
+    dy = dy - hD4 - 6
+    local _, hD5cb = makeKCCheckbox(display, dy, "compactMode", "Compact Mode")
+    dy = dy - hD5cb - 6
 
     local _, hD5 = makeKCCheckboxCustom(display, dy, "Show Minimap Button",
         function()
@@ -994,75 +1669,179 @@ local function CreateSettingsWindow()
     dy = dy - hD5 - 10
 
     divider(display, dy); dy = dy - 14
-    sectionLabel(display, "DATA REGION", dy); dy = dy - 18
+    sectionLabel(display, "REGION & PLACEMENT", dy); dy = dy - 18
 
     local hDRegion = makeKCDropdown(display, dy, "dataRegion", "Region", {
-        { value = "auto", label = "Auto-detect" },
-        { value = "eu",   label = "EU" },
-        { value = "us",   label = "US" },
+        { value = "auto", label = "Auto-detect" }, { value = "eu", label = "EU" },
+        { value = "us", label = "US" }, { value = "kr", label = "KR" }, { value = "tw", label = "TW" },
     }, function() UpdatePanel() end)
-    dy = dy - hDRegion - 14
+    dy = dy - hDRegion - 8
 
-    divider(display, dy); dy = dy - 14
-    sectionLabel(display, "POSITION", dy); dy = dy - 18
-
-    local hDPos = makeKCDropdown(display, dy, "position", "Tooltip Position", {
-        { value = "RIGHT",  label = "Right (below RIO)" },
-        { value = "BOTTOM", label = "Bottom of window"  },
+    local hDPos = makeKCDropdown(display, dy, "position", "Panel Position", {
+        { value = "RIGHT", label = "Right (below RIO)" },
+        { value = "BOTTOM", label = "Bottom of window" },
     }, function()
-        -- Selecting a preset clears any user-dragged override.
         if KeystoneCutoffsDB then KeystoneCutoffsDB.panelPosition = nil end
     end)
-    dy = dy - hDPos - 14
+    dy = dy - hDPos - 8
 
+    local _, hStandalone = makeKCCheckbox(display, dy, "standaloneMode", "Standalone Panel",
+        function()
+            if KeystoneCutoffsDB and KeystoneCutoffsDB.standaloneMode and not panel
+                and C_AddOns and C_AddOns.LoadAddOn then
+                pcall(C_AddOns.LoadAddOn, "Blizzard_ChallengesUI")
+            end
+            if ApplyPanelPresentation then ApplyPanelPresentation() end
+        end)
+    dy = dy - hStandalone - 10
     display:SetHeight(math.abs(dy))
+
+    -- ── Goals tab ─────────────────────────────────────────────────────────────
+    local gy = -10
+    gy = gy - introText(goals,
+        "Optional progression tools. Nothing in this tab is enabled by default.", gy) - 6
+    sectionLabel(goals, "FOCUSED GOAL", gy); gy = gy - 18
+    local _, hGoal = makeKCCheckbox(goals, gy, "goalMode", "Enable Goal Mode", nil,
+        "Replaces the three default target rows with one selected goal and a clear Need or Ahead value.")
+    gy = gy - hGoal - 6
+    local hGoalTarget = makeKCDropdown(goals, gy, "goalTarget", "Goal", GOAL_OPTIONS, nil,
+        "Select a percentile, achievement, or custom score target.")
+    gy = gy - hGoalTarget - 8
+    local hCustom = makeKCSlider(goals, gy, "goalCustomScore", "Custom", 1000, 5000, 10,
+        function() UpdatePanel() end,
+        "Used only when Goal is set to Custom score.")
+    gy = gy - hCustom - 12
+
+    divider(goals, gy); gy = gy - 14
+    sectionLabel(goals, "OPTIONAL INSIGHTS", gy); gy = gy - 18
+    local _, hMove = makeKCCheckbox(goals, gy, "showCutoffMovement", "Show Cutoff Movement", nil,
+        "Compares the current Top 0.1% cutoff with the most recent data release previously seen while enabled.")
+    gy = gy - hMove - 6
+    local _, hWeak = makeKCCheckbox(goals, gy, "showWeakestDungeon", "Show Furthest-Behind Dungeon", nil,
+        "Adds one summary row for the largest key-level deficit versus title pace. It is not a score-gain recommendation.")
+    gy = gy - hWeak - 6
+    local _, hChars = makeKCCheckbox(goals, gy, "trackCharacters", "Track Character Scores", nil,
+        "Stores last-known scores in this addon's account-wide settings for the characters you log into. Off by default.")
+    gy = gy - hChars - 10
+    local hDetails = makeKCButton(goals, gy, "Open Detailed Ladder View", function() ShowAdvancedDetails() end,
+        "Shows all percentile cutoffs, achievement goals, population values, and any opted-in character snapshots.")
+    gy = gy - hDetails - 10
+    goals:SetHeight(math.abs(gy))
 
     -- ── Customize tab ─────────────────────────────────────────────────────────
     local cy2 = -10
-    sectionLabel(customize, "OVERLAY TEXT", cy2); cy2 = cy2 - 18
+    cy2 = cy2 - introText(customize,
+        "Adjust readability without changing which information is shown.", cy2) - 6
+    sectionLabel(customize, "DUNGEON OVERLAY TEXT", cy2); cy2 = cy2 - 18
 
     local hFont = makeKCFontDropdown(customize, cy2, "overlayFont", "Font",
         function() UpdateDungeonOverlays() end)
-    cy2 = cy2 - hFont - 12
-
+    cy2 = cy2 - hFont - 8
     local hScoreSize = makeKCSlider(customize, cy2, "overlayScoreSize", "Score Size", 8, 28, 1,
         function() UpdateDungeonOverlays() end)
     cy2 = cy2 - hScoreSize - 6
-
     local hTimeSize = makeKCSlider(customize, cy2, "overlayTimeSize", "Time Size", 6, 24, 1,
         function() UpdateDungeonOverlays() end)
-    cy2 = cy2 - hTimeSize - 10
-
+    cy2 = cy2 - hTimeSize - 8
     local hOutline = makeKCDropdown(customize, cy2, "overlayOutline", "Outline", {
-        { value = "NONE",         label = "None"          },
-        { value = "OUTLINE",      label = "Outline"       },
-        { value = "THICKOUTLINE", label = "Thick Outline" },
-        { value = "SHADOW",       label = "Shadow"        },
+        { value = "NONE", label = "None" }, { value = "OUTLINE", label = "Outline" },
+        { value = "THICKOUTLINE", label = "Thick Outline" }, { value = "SHADOW", label = "Shadow" },
     }, function() UpdateDungeonOverlays() end)
-    cy2 = cy2 - hOutline - 14
+    cy2 = cy2 - hOutline - 12
 
     divider(customize, cy2); cy2 = cy2 - 14
-    sectionLabel(customize, "PANEL POSITION", cy2); cy2 = cy2 - 18
-
+    sectionLabel(customize, "PANEL APPEARANCE", cy2); cy2 = cy2 - 18
+    local hScale = makeKCSlider(customize, cy2, "panelScale", "Scale", 75, 150, 5,
+        function() if ApplyPanelPresentation then ApplyPanelPresentation() end end)
+    cy2 = cy2 - hScale - 6
+    local hOpacity = makeKCSlider(customize, cy2, "panelOpacity", "Opacity", 40, 100, 5,
+        function() if ApplyPanelPresentation then ApplyPanelPresentation() end end)
+    cy2 = cy2 - hOpacity - 10
     local hReset = makeKCButton(customize, cy2, "Reset Panel Position", function()
-        if KeystoneCutoffsDB then KeystoneCutoffsDB.panelPosition = nil end
+        if KeystoneCutoffsDB then
+            KeystoneCutoffsDB.panelPosition = nil
+            KeystoneCutoffsDB.standalonePosition = nil
+        end
         PositionPanel()
     end)
-    cy2 = cy2 - hReset - 8
-
-    local hintFs = customize:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hintFs:SetPoint("TOPLEFT",  customize, "TOPLEFT",  14, cy2)
-    hintFs:SetPoint("TOPRIGHT", customize, "TOPRIGHT", -14, cy2)
-    hintFs:SetJustifyH("LEFT")
-    hintFs:SetText("Tip: Shift+Left-drag the Keystone Cutoffs panel to reposition it.")
-    hintFs:SetWordWrap(true)
-    cy2 = cy2 - 32
-
+    cy2 = cy2 - hReset - 6
+    local hResetVisual = makeKCButton(customize, cy2, "Reset Appearance", function()
+        if KeystoneCutoffsDB then
+            KeystoneCutoffsDB.overlayFont = DB_DEFAULTS.overlayFont
+            KeystoneCutoffsDB.overlayScoreSize = DB_DEFAULTS.overlayScoreSize
+            KeystoneCutoffsDB.overlayTimeSize = DB_DEFAULTS.overlayTimeSize
+            KeystoneCutoffsDB.overlayOutline = DB_DEFAULTS.overlayOutline
+            KeystoneCutoffsDB.panelScale = DB_DEFAULTS.panelScale
+            KeystoneCutoffsDB.panelOpacity = DB_DEFAULTS.panelOpacity
+        end
+        for _, refresh in ipairs(settingsRefreshFns) do refresh() end
+        UpdateDungeonOverlays()
+        if ApplyPanelPresentation then ApplyPanelPresentation() end
+    end)
+    cy2 = cy2 - hResetVisual - 8
+    cy2 = cy2 - introText(customize,
+        "Tip: Shift+Left-drag the panel to reposition it.", cy2)
     customize:SetHeight(math.abs(cy2))
 
+    -- ── Advanced tab ──────────────────────────────────────────────────────────
+    local ay = -10
+    ay = ay - introText(advanced,
+        "Deeper ladder context for players who want it; the standard All ladder remains the default.", ay) - 6
+    sectionLabel(advanced, "LADDER DATA", ay); ay = ay - 18
+    local hFaction = makeKCDropdown(advanced, ay, "dataFaction", "Ladder", {
+        { value = "all", label = "All players" },
+        { value = "horde", label = "Horde" },
+        { value = "alliance", label = "Alliance" },
+    }, function() UpdatePanel() end,
+        "Uses faction-specific percentile and goal data when present. Dungeon Pace remains region-wide. All players is the default.")
+    ay = ay - hFaction - 12
+    local hAdvancedDetails = makeKCButton(advanced, ay, "Open Detailed Ladder View",
+        function() ShowAdvancedDetails() end,
+        "A deliberate popout keeps population and achievement data out of the lightweight panel.")
+    ay = ay - hAdvancedDetails - 12
+    divider(advanced, ay); ay = ay - 14
+    sectionLabel(advanced, "DATA BEHAVIOR", ay); ay = ay - 18
+    ay = ay - introText(advanced,
+        "The addon cannot access the internet in game. Cutoffs come from the bundled daily data file. Movement and character history are local SavedVariables and are collected only after you enable them.", ay) - 6
+    advanced:SetHeight(math.abs(ay))
+
+    -- ── Persistent footer utility ─────────────────────────────────────────────
+    local FOOTER_H = 38
+    local footerSep = win:CreateTexture(nil, "BACKGROUND")
+    footerSep:SetHeight(1)
+    footerSep:SetPoint("BOTTOMLEFT", win, "BOTTOMLEFT", 0, FOOTER_H)
+    footerSep:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", 0, FOOTER_H)
+    footerSep:SetColorTexture(ST.border[1], ST.border[2], ST.border[3], 0.7)
+
+    local whatsNewBtn = CreateFrame("Button", nil, win, "BackdropTemplate")
+    whatsNewBtn:SetSize(110, 24)
+    whatsNewBtn:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", -10, 7)
+    mixBD(whatsNewBtn)
+    whatsNewBtn:SetBackdrop(BD_EDGE)
+    whatsNewBtn:SetBackdropColor(ST.element[1], ST.element[2], ST.element[3], 1)
+    whatsNewBtn:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.6)
+
+    local whatsNewText = whatsNewBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    whatsNewText:SetPoint("CENTER")
+    whatsNewText:SetText("What's New")
+    whatsNewText:SetTextColor(ST.text[1], ST.text[2], ST.text[3])
+
+    whatsNewBtn:SetScript("OnEnter", function()
+        whatsNewBtn:SetBackdropBorderColor(ST.accent[1], ST.accent[2], ST.accent[3], 0.9)
+        whatsNewText:SetTextColor(ST.accent[1], ST.accent[2], ST.accent[3])
+    end)
+    whatsNewBtn:SetScript("OnLeave", function()
+        whatsNewBtn:SetBackdropBorderColor(ST.border[1], ST.border[2], ST.border[3], 0.6)
+        whatsNewText:SetTextColor(ST.text[1], ST.text[2], ST.text[3])
+    end)
+    whatsNewBtn:SetScript("OnClick", function()
+        ShowWhatsNewWindow()
+        pcall(PlaySound, SOUNDKIT and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON or 856)
+    end)
+
     -- ── Window sizing + initial anchor ────────────────────────────────────────
-    local contentH = math.max(display:GetHeight(), customize:GetHeight())
-    win:SetSize(WIN_W, TITLE_H + 1 + TAB_BAR_H + 1 + contentH + 8)
+    local contentH = math.max(display:GetHeight(), goals:GetHeight(), customize:GetHeight(), advanced:GetHeight())
+    win:SetSize(WIN_W, TITLE_H + 1 + TAB_BAR_H + 1 + contentH + FOOTER_H + 8)
     win:ClearAllPoints()
     win:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 
@@ -1135,7 +1914,7 @@ local function CreatePanel()
     panel:SetWidth(FRAME_WIDTH)
     panel:SetFrameStrata("MEDIUM")
     panel:SetFrameLevel(10)
-    panel.collapsed = false
+    panel.collapsed = KeystoneCutoffsDB and KeystoneCutoffsDB.collapsed == true
 
     -- Shift+drag to reposition the panel; position persists across sessions.
     panel:SetClampedToScreen(true)
@@ -1147,11 +1926,21 @@ local function CreatePanel()
     end)
     panel:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
-        -- Persist drag offsets relative to ChallengesFrame so the panel still
-        -- follows Blizzard's UI panel push/stack behavior.
         local left, top = self:GetLeft(), self:GetTop()
         if left and top then
             KeystoneCutoffsDB = KeystoneCutoffsDB or {}
+            if KeystoneCutoffsDB.standaloneMode then
+                self:ClearAllPoints()
+                self:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+                KeystoneCutoffsDB.standalonePosition = {
+                    point = "TOPLEFT", relPoint = "BOTTOMLEFT",
+                    x = math.floor(left + 0.5), y = math.floor(top + 0.5),
+                }
+                return
+            end
+
+            -- Persist drag offsets relative to ChallengesFrame so the panel still
+            -- follows Blizzard's UI panel push/stack behavior.
             local cfRight = ChallengesFrame and ChallengesFrame:GetRight()
             local cfTop   = ChallengesFrame and ChallengesFrame:GetTop()
 
@@ -1236,7 +2025,9 @@ local function CreatePanel()
     split.mythL,   split.mythV   = createSplitRow(panel, y); y = y - ROW_H - ROW_GAP
     split.pctL,    split.pctV    = createSplitRow(panel, y); y = y - ROW_H - SECTION_GAP
     split.seasonL, split.seasonV = createSplitRow(panel, y); y = y - ROW_H - ROW_GAP
-    split.updatedL,split.updatedV= createSplitRow(panel, y)
+    split.updatedL,split.updatedV= createSplitRow(panel, y); y = y - ROW_H - ROW_GAP
+    split.movementL, split.movementV = createSplitRow(panel, y); y = y - ROW_H - ROW_GAP
+    split.weakestL, split.weakestV = createSplitRow(panel, y)
 
     panel.split = split
 
@@ -1246,7 +2037,9 @@ local function CreatePanel()
         split.mythL,   split.mythV,
         split.pctL,    split.pctV,
         split.seasonL, split.seasonV,
-        split.updatedL,split.updatedV
+        split.updatedL,split.updatedV,
+        split.movementL, split.movementV,
+        split.weakestL, split.weakestV
     )
     panel.dataFrames = dataFrames
 
@@ -1400,6 +2193,7 @@ local function CreatePanel()
     -- ── Collapse toggle ───────────────────────────────────────────────────────
     collapseBtn:SetScript("OnClick", function()
         panel.collapsed = not panel.collapsed
+        if KeystoneCutoffsDB then KeystoneCutoffsDB.collapsed = panel.collapsed end
         if panel.collapsed then
             for _, f in ipairs(panel.dataFrames) do f:SetShown(false) end
             panel:SetHeight(COLLAPSED_HEIGHT)
@@ -1411,7 +2205,13 @@ local function CreatePanel()
     end)
 
     panel:Hide()
+    if panel.collapsed then
+        for _, f in ipairs(panel.dataFrames) do f:SetShown(false) end
+        panel:SetHeight(COLLAPSED_HEIGHT)
+        collapseArrow:SetRotation(-math.pi / 2)
+    end
     PositionPanel()
+    if ApplyPanelPresentation then ApplyPanelPresentation() end
 end
 
 -- ─── Panel positioning ────────────────────────────────────────────────────────
@@ -1420,6 +2220,20 @@ PositionPanel = function()
     panel:ClearAllPoints()
 
     local db = KeystoneCutoffsDB or {}
+    if db.standaloneMode then
+        panel:SetParent(UIParent)
+        local customStandalone = db.standalonePosition
+        if type(customStandalone) == "table" and customStandalone.point then
+            panel:SetPoint(customStandalone.point, UIParent,
+                customStandalone.relPoint or customStandalone.point,
+                customStandalone.x or 0, customStandalone.y or 0)
+        else
+            panel:SetPoint("CENTER", UIParent, "CENTER", 310, 60)
+        end
+        return
+    end
+
+    panel:SetParent(ChallengesFrame)
     local custom = db.panelPosition
     if type(custom) == "table" and custom.point then
         -- New schema: anchor to ChallengesFrame so panel follows panel-push.
@@ -1450,6 +2264,23 @@ PositionPanel = function()
     end
 end
 
+ApplyPanelPresentation = function()
+    if not panel then return end
+    local db = KeystoneCutoffsDB or {}
+    panel:SetScale(math.max(0.75, math.min(1.50, (tonumber(db.panelScale) or 100) / 100)))
+    panel:SetAlpha(math.max(0.40, math.min(1.00, (tonumber(db.panelOpacity) or 100) / 100)))
+    PositionPanel()
+    if db.standaloneMode then
+        panel:Show()
+        UpdatePanel()
+    elseif ChallengesFrame and ChallengesFrame:IsShown() then
+        panel:Show()
+        UpdatePanel()
+    else
+        panel:Hide()
+    end
+end
+
 -- ─── Region helper ────────────────────────────────────────────────────────────
 local function GetRegion()
     local regionMap = { [1]="us", [2]="kr", [3]="eu", [4]="tw", [5]="us" }
@@ -1460,7 +2291,7 @@ end
 
 -- Returns the region to use for data lookups: manual setting if configured,
 -- otherwise the auto-detected game region.
-local function GetDataRegion()
+GetDataRegion = function()
     local db = KeystoneCutoffsDB or {}
     local setting = db.dataRegion
     if setting and setting ~= "auto" then return setting end
@@ -1497,20 +2328,23 @@ local function relayoutPanel()
         L:SetShown(false); V:SetShown(false)
     end
 
-    -- gap01 (always visible)
+    -- First target row is always visible. Goal Mode repurposes it as the chosen goal.
     placeRow(split.gap01L, split.gap01V); y = y - ROW_H - ROW_GAP
 
-    -- gap1 (always visible)
-    placeRow(split.gap1L, split.gap1V); y = y - ROW_H - ROW_GAP
-
-    -- myth (toggleable)
-    if db.showMythThreshold ~= false then
-        placeRow(split.mythL, split.mythV)
-        if panel.mythTooltipHit then panel.mythTooltipHit:Show() end
-        y = y - ROW_H - ROW_GAP
-    else
+    if db.goalMode then
+        hideRow(split.gap1L, split.gap1V)
         hideRow(split.mythL, split.mythV)
         if panel.mythTooltipHit then panel.mythTooltipHit:Hide() end
+    else
+        placeRow(split.gap1L, split.gap1V); y = y - ROW_H - ROW_GAP
+        if db.showMythThreshold ~= false then
+            placeRow(split.mythL, split.mythV)
+            if panel.mythTooltipHit then panel.mythTooltipHit:Show() end
+            y = y - ROW_H - ROW_GAP
+        else
+            hideRow(split.mythL, split.mythV)
+            if panel.mythTooltipHit then panel.mythTooltipHit:Hide() end
+        end
     end
 
     if compact then
@@ -1518,6 +2352,8 @@ local function relayoutPanel()
         hideRow(split.pctL,     split.pctV)
         hideRow(split.seasonL,  split.seasonV)
         hideRow(split.updatedL, split.updatedV)
+        hideRow(split.movementL, split.movementV)
+        hideRow(split.weakestL, split.weakestV)
         if panel.seasonTooltipHit then panel.seasonTooltipHit:Hide() end
 
         -- Also hide the dungeon pace section.
@@ -1555,6 +2391,22 @@ local function relayoutPanel()
     -- updated (always visible when not compact)
     placeRow(split.updatedL, split.updatedV)
     y = y - ROW_H  -- advance below the updated row
+
+    if db.showCutoffMovement then
+        y = y - ROW_GAP
+        placeRow(split.movementL, split.movementV)
+        y = y - ROW_H
+    else
+        hideRow(split.movementL, split.movementV)
+    end
+
+    if db.showWeakestDungeon then
+        y = y - ROW_GAP
+        placeRow(split.weakestL, split.weakestV)
+        y = y - ROW_H
+    else
+        hideRow(split.weakestL, split.weakestV)
+    end
 
     -- ── Dungeon pace (optional section) ───────────────────────────────────────
     local PACE_ROW_H   = 16
@@ -1624,7 +2476,8 @@ UpdatePanel = function()
         split.gap01L:SetText(col(C.grey, "Status"))
         split.gap01V:SetText(col(C.grey, msg))
         for _, k in ipairs({ "gap1L","gap1V","mythL","mythV","pctL","pctV",
-                              "seasonL","seasonV","updatedL","updatedV" }) do
+                              "seasonL","seasonV","updatedL","updatedV",
+                              "movementL","movementV","weakestL","weakestV" }) do
             split[k]:SetText("")
         end
     end
@@ -1645,50 +2498,53 @@ UpdatePanel = function()
         return
     end
 
-    panel.subtitle:SetText(string.format("Keystone Cutoffs · %s · All", string.upper(region)))
+    local faction = getDataFaction()
+    local factionLabel = faction == "all" and "All"
+        or (faction == "horde" and "Horde" or "Alliance")
+    panel.subtitle:SetText(string.format("Keystone Cutoffs · %s · %s", string.upper(region), factionLabel))
 
     local pct  = regionData.percentiles or {}
-    local p999 = pct["p999"] and pct["p999"].all
-    local p990 = pct["p990"] and pct["p990"].all
+    local p999 = getPercentileEntry(pct, "p999")
+    local p990 = getPercentileEntry(pct, "p990")
 
     local myScore = 0
     if C_ChallengeMode and C_ChallengeMode.GetOverallDungeonScore then
         myScore = C_ChallengeMode.GetOverallDungeonScore() or 0
     end
 
-    -- Top 0.1%: left = target context, right = actionable gap
-    if p999 and p999.score then
-        local gap01 = math.max(0, p999.score - myScore)
-        split.gap01L:SetText(col(C.white, "Top 0.1%") .. col(C.grey, " (" .. fmt(p999.score) .. ")"))
-        split.gap01V:SetText(string.format("%s+ |r%s%s|r",
-            C.white, scoreColorFor(p999.score), fmt(gap01)))
-    else
-        split.gap01L:SetText(col(C.white, "Top 0.1%") .. col(C.grey, " (-)"))
-        split.gap01V:SetText(col(C.grey, "—"))
-    end
+    recordOptionalSnapshots(region, regionData, myScore)
 
-    -- Top 1%: left = target context, right = actionable gap
-    if p990 and p990.score then
-        local gap1 = math.max(0, p990.score - myScore)
-        split.gap1L:SetText(col(C.white, "Top 1%") .. col(C.grey, " (" .. fmt(p990.score) .. ")"))
-        split.gap1V:SetText(string.format("%s+ |r%s%s|r",
-            C.white, scoreColorFor(p990.score), fmt(gap1)))
+    if db.goalMode then
+        local goalLabel, goalScore = getGoalTarget(regionData)
+        split.gap01L:SetText(col(C.white, goalLabel)
+            .. col(C.grey, " (" .. fmt(goalScore) .. ")"))
+        split.gap01V:SetText(formatGoalDifference(goalScore, myScore))
     else
-        split.gap1L:SetText(col(C.white, "Top 1%") .. col(C.grey, " (—)"))
-        split.gap1V:SetText(col(C.grey, "—"))
-    end
+        if p999 and p999.score then
+            split.gap01L:SetText(col(C.white, "Top 0.1%") .. col(C.grey, " (" .. fmt(p999.score) .. ")"))
+            split.gap01V:SetText(formatGoalDifference(p999.score, myScore))
+        else
+            split.gap01L:SetText(col(C.white, "Top 0.1%") .. col(C.grey, " (—)"))
+            split.gap01V:SetText(col(C.grey, "—"))
+        end
 
-    -- Keystone Myth threshold (toggleable)
-    local titles = regionData.titles or {}
-    local myth   = titles["keystoneMyth"]
-    if myth and myth.fixedScore then
-        local mythGap = math.max(0, myth.fixedScore - myScore)
-        split.mythL:SetText(col(C.white, "Keystone Myth") .. col(C.grey, " (" .. fmt(myth.fixedScore) .. ")"))
-        split.mythV:SetText(string.format("%s+ |r%s%s|r",
-            C.white, scoreColorFor(myth.fixedScore), fmt(mythGap)))
-    else
-        split.mythL:SetText(col(C.white, "Keystone Myth") .. col(C.grey, " (—)"))
-        split.mythV:SetText(col(C.grey, "—"))
+        if p990 and p990.score then
+            split.gap1L:SetText(col(C.white, "Top 1%") .. col(C.grey, " (" .. fmt(p990.score) .. ")"))
+            split.gap1V:SetText(formatGoalDifference(p990.score, myScore))
+        else
+            split.gap1L:SetText(col(C.white, "Top 1%") .. col(C.grey, " (—)"))
+            split.gap1V:SetText(col(C.grey, "—"))
+        end
+
+        local titles = regionData.titles or {}
+        local myth = titles["keystoneMyth"]
+        if myth and myth.fixedScore then
+            split.mythL:SetText(col(C.white, "Keystone Myth") .. col(C.grey, " (" .. fmt(myth.fixedScore) .. ")"))
+            split.mythV:SetText(formatGoalDifference(myth.fixedScore, myScore))
+        else
+            split.mythL:SetText(col(C.white, "Keystone Myth") .. col(C.grey, " (—)"))
+            split.mythV:SetText(col(C.grey, "—"))
+        end
     end
 
     -- Estimated percentile
@@ -1696,7 +2552,7 @@ UpdatePanel = function()
     local tierLabel = { "0.1","1","10","25","40" }
     local myPercentile = "> 40%"
     for i, key in ipairs(tierOrder) do
-        local t = pct[key] and pct[key].all
+        local t = getPercentileEntry(pct, key)
         if t and myScore >= t.score then
             myPercentile = "Top " .. tierLabel[i] .. "%"
             break
@@ -1731,8 +2587,20 @@ UpdatePanel = function()
     end
     split.updatedV:SetText(staleColor .. dateOnly .. staleSuffix .. "|r")
 
+    split.movementL:SetText("Cutoff Movement")
+    local movement = getCutoffMovement(region)
+    if movement then
+        local movementColor = movement > 0 and "|cFFFF9933" or (movement < 0 and "|cFF44FF44" or C.grey)
+        local sign = movement > 0 and "+" or ""
+        split.movementV:SetText(movementColor .. sign .. fmt(movement) .. "|r")
+    else
+        split.movementV:SetText(col(C.grey, "Collecting…"))
+    end
+
+    local weakestName, weakestGap
+
     -- ── Dungeon pace rows ──────────────────────────────────────────────────────
-    if db.showDungeonPace and panel.paceRows then
+    if (db.showDungeonPace or db.showWeakestDungeon) and panel.paceRows then
         for i, row in ipairs(panel.paceRows) do
             local d = DUNGEON_PACE_DATA[i]
 
@@ -1749,6 +2617,13 @@ UpdatePanel = function()
             end
 
             local benchmark = getDungeonBenchmark(d.mapID)
+
+            if benchmark and playerLevel then
+                local gap = playerLevel - benchmark
+                if not weakestGap or gap < weakestGap then
+                    weakestName, weakestGap = d.short, gap
+                end
+            end
 
             -- Left: abbreviated name + player's key level
             if playerLevel then
@@ -1778,6 +2653,16 @@ UpdatePanel = function()
                 row.V:SetText("")
             end
         end
+    end
+
+    split.weakestL:SetText("Furthest Behind")
+    if weakestName and weakestGap and weakestGap < 0 then
+        local unit = math.abs(weakestGap) == 1 and " key" or " keys"
+        split.weakestV:SetText("|cFFFF4444" .. weakestName .. " " .. weakestGap .. unit .. "|r")
+    elseif weakestName then
+        split.weakestV:SetText("|cFF44FF44On pace|r")
+    else
+        split.weakestV:SetText(col(C.grey, "No runs"))
     end
 
     relayoutPanel()
@@ -1993,7 +2878,9 @@ local function InitializeMinimapButton()
         icon  = "Interface\\Icons\\inv_relics_hourglass",
         OnClick = function(_, button)
             if button == "RightButton" then
-                if ToggleChallengesUI then
+                if KeystoneCutoffsDB and KeystoneCutoffsDB.standaloneMode and panel then
+                    if panel:IsShown() then panel:Hide() else panel:Show(); UpdatePanel() end
+                elseif ToggleChallengesUI then
                     ToggleChallengesUI()
                 end
             else
@@ -2003,7 +2890,9 @@ local function InitializeMinimapButton()
         OnTooltipShow = function(tt)
             tt:AddLine("|cFFFFD100Keystone Cutoffs|r")
             tt:AddLine("|cFFFFFFFFLeft-click:|r Open settings", 0.85, 0.85, 0.85)
-            tt:AddLine("|cFFFFFFFFRight-click:|r Toggle Mythic+ Dungeons", 0.85, 0.85, 0.85)
+            local rightAction = KeystoneCutoffsDB and KeystoneCutoffsDB.standaloneMode
+                and "Toggle standalone panel" or "Toggle Mythic+ Dungeons"
+            tt:AddLine("|cFFFFFFFFRight-click:|r " .. rightAction, 0.85, 0.85, 0.85)
         end,
     })
 
@@ -2032,12 +2921,15 @@ local function OnChallengesFrameShow()
 end
 
 local function OnChallengesFrameHide()
-    if panel then panel:Hide() end
+    if panel and not (KeystoneCutoffsDB and KeystoneCutoffsDB.standaloneMode) then
+        panel:Hide()
+    end
 end
 
 -- ─── Initialization ───────────────────────────────────────────────────────────
 local dataReady = false
 local uiReady   = false
+local initialized = false
 
 local function InitializeUI()
     CreatePanel()
@@ -2052,6 +2944,7 @@ local function InitializeUI()
     end)
 
     if ChallengesFrame:IsShown() then OnChallengesFrameShow() end
+    if ApplyPanelPresentation then ApplyPanelPresentation() end
 
     local updater = CreateFrame("Frame")
     for _, ev in ipairs({
@@ -2069,7 +2962,8 @@ local function InitializeUI()
 end
 
 local function TryInitialize()
-    if dataReady and uiReady then
+    if dataReady and uiReady and not initialized then
+        initialized = true
         refreshScorePalette()
         InitializeUI()
     end
@@ -2115,7 +3009,30 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         end
 
         dataReady = true
+        if IsAddonLoaded("Blizzard_ChallengesUI") then uiReady = true end
+        if KeystoneCutoffsDB.standaloneMode and not uiReady
+            and C_AddOns and C_AddOns.LoadAddOn then
+            pcall(C_AddOns.LoadAddOn, "Blizzard_ChallengesUI")
+            if IsAddonLoaded("Blizzard_ChallengesUI") then uiReady = true end
+        end
         TryInitialize()
+
+        -- Optional history collection does not require the Mythic+ window to be opened.
+        C_Timer.After(2, function()
+            if not KeystoneCutoffsDB or not (KeystoneCutoffsDB.showCutoffMovement
+                or KeystoneCutoffsDB.trackCharacters) then return end
+            local region = GetDataRegion and GetDataRegion() or GetRegion()
+            local regionData = KeystoneCutoffsData and KeystoneCutoffsData.regions
+                and KeystoneCutoffsData.regions[region]
+            if not regionData then return end
+            local score = C_ChallengeMode and C_ChallengeMode.GetOverallDungeonScore
+                and C_ChallengeMode.GetOverallDungeonScore() or 0
+            recordOptionalSnapshots(region, regionData, score)
+        end)
+
+        -- Delay until the login UI has settled. The stable news ID is separate
+        -- from daily vdata tags, so routine data releases never reopen this.
+        C_Timer.After(1, MaybeShowCurrentNews)
 
     elseif event == "ADDON_LOADED" and arg1 == "Blizzard_ChallengesUI" then
         self:UnregisterEvent("ADDON_LOADED")
