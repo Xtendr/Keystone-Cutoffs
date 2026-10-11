@@ -2,6 +2,10 @@
 
 An in-game Mythic+ title and percentile tracker for World of Warcraft.
 
+<p align="center">
+  <a href="https://www.buymeacoffee.com/xtendr"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="40"></a>
+</p>
+
 Keystone Cutoffs brings live Raider.IO Mythic+ rating cutoffs directly into your World of Warcraft UI. You no longer have to tab out to a web browser to see how close you are to the top 0.1% title or track your region's percentile brackets. Everything you need to know about the current season's competitive ladder is available at a glance.
 
 ## Features
