@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/readme/logo.png" alt="Keystone Cutoffs logo" width="128">
-</p>
-
 <h1 align="center">Keystone Cutoffs</h1>
 
 <p align="center">
