@@ -12,3 +12,4 @@ ignore:
   - tests
   - walkthrough.md
   - .pkgmeta
+  - docs
