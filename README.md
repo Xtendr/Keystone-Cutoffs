@@ -108,7 +108,7 @@ The default panel stays light and simple. Turn on more from the **Goals** and **
 - **Character tracking:** remembers the last known scores of your other characters.
 - **Standalone panel:** keep the panel on screen outside the Mythic+ window, with its own size, opacity and position.
 - **Detailed Ladder View:** a separate window with every percentile, achievement threshold and population number.
-- **Works with [Keystone Meta](https://github.com/Xtendr/Keystone-Meta):** when both addons are on, they sit neatly side by side.
+- **Works with [Keystone Meta](https://github.com/Xtendr/KeystoneMeta):** when both addons are on, they sit neatly side by side.
 
 ## Getting started
 
@@ -127,7 +127,7 @@ The default panel stays light and simple. Turn on more from the **Goals** and **
 
 ## Feedback
 
-Have an idea, found a bug or missing a feature? [Open an issue](https://github.com/Xtendr/Keystone-Cutoffs/issues)
+Have an idea, found a bug or missing a feature? [Open an issue](https://github.com/Xtendr/KeystoneCutoffs/issues)
 here on GitHub or leave a comment on [CurseForge](https://www.curseforge.com/wow/addons/keystone-cutoffs).
 
 ## Credits
