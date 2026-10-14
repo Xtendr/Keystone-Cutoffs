@@ -488,7 +488,7 @@ local function CreateWhatsNewWindow()
 
     local versionText = versionBand:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     versionText:SetPoint("LEFT", 12, 1)
-    versionText:SetText(col(C.white, "v1.3.0"))
+    versionText:SetText(col(C.white, "v1.3.1"))
 
     local intro = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     intro:SetPoint("TOPLEFT", win, "TOPLEFT", 18, -94)
